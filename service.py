@@ -1,69 +1,12 @@
-import contextlib
 import dataclasses
 import functools
 import inspect
-from pathlib import Path
 import typing
-from typing import Awaitable, Callable, Coroutine, Generic, Optional
+from typing import Awaitable, Callable, Generic
 
 T = typing.TypeVar("T")
 
-
-@dataclasses.dataclass
-class User:
-    name: str
-
-
-ROOT = User("root")
-
-
-# The user _should not_ be able to possibly use an execution context
-# that's not a subset of the permissions of their own execution context.
-# Obviously this implementation doesn't do that yet.
-#
-# For the intended api is eg.
-# with current_execution_context().replace(user=User("stef"), root="/home/stef"):
-#     files = Files()
-@dataclasses.dataclass(frozen=True)
-class ExecutionContext:
-    user: User
-    root: Path
-    working_directory: Path
-    # if sandbox, then by default activating will chroot
-    sandbox: bool = True
-
-    def chroot(self, new_root: Optional[Path] = None) -> "ExecutionContext":
-        # change root to new_root or working_directory
-        if new_root is None:
-            new_root = self.working_directory
-        if new_root.is_absolute():
-            new_root = new_root.relative_to("/")
-        return dataclasses.replace(
-            self,
-            root=self.root.joinpath(new_root),
-            working_directory=Path("/"),
-        )
-
-    @contextlib.contextmanager
-    def active(self):
-        print(f"Activating {self}")
-        global _EXECUTION_CONTEXT
-        old_execution_context = _EXECUTION_CONTEXT
-        _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
-        try:
-            yield
-        finally:
-            _EXECUTION_CONTEXT = old_execution_context
-
-
-_EXECUTION_CONTEXT = ExecutionContext(ROOT, Path("/"), Path("/"))
-
-# WARNING: THINK ABOUT THIS A LOT SOMETIME
-# Potential for security holes here. For instance, if we can pass a callback
-# to a service and get it to execute it, and that callback grabs execution context,
-# we could leak or allow setting an execution context that's not ours.
-def current_execution_context():
-    return _EXECUTION_CONTEXT
+from execution_context import ExecutionContext, current_execution_context
 
 
 # TODO:
@@ -72,6 +15,8 @@ def current_execution_context():
 #   - if a call exits without awaiting on a task, that task should still complete
 #       - but don't await on it; we _should_ be able to do things like say "log this later"
 #       - probably better to make this explicit, ie. you have to mark anything you're not waiting on
+#   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
+#       good target for making stack traces better / easier to read.
 
 
 class ServiceResultBase(Awaitable[T]):
@@ -99,7 +44,6 @@ class ServiceResultBase(Awaitable[T]):
             finally:
                 self._completed = True
         if self._exception is not None:
-            print((type(self._exception), self._exception))
             raise self._exception
         return self._result
 
@@ -251,54 +195,81 @@ async def resolve_args(args, kwargs):
 
 @dataclasses.dataclass
 class ServiceCall:
+    """Data class for a ServiceCall to be passed down to the kernel to execute.
+    Simply we're the kernel to execute the following:
+
+    service = lookup_or_start_service(service)
+    endpoint = getattr(service, endpoint)
+    with execution_context.active():
+        return endpoint(*args, **kwargs)
+    """
+
+    # Desired execution context for the system call to run in
     execution_context: ExecutionContext
+    # The name (id) of the service to call; the kernel is responsible for mapping this
     service: str
+    # The name of the endpoint method to call on the service
     endpoint: str
+    # args and kwargs for the endpoint method
     args: list[any]
     kwargs: dict[str, any]
 
     def __await__(self):
-        # TODO: document why this is this way, it's very particular and I have a cat :)
-        result = yield self
-        return result
+        # This is the key of how this whole system works. `await`ing on a ServiceCall
+        # instance yields the coroutine down into `kernel_main`, which can then validate
+        # and execute the call. In normal asyncio this would be illegial; in the normal
+        # event loops, yielding a value is illegal and throws a RuntimeException. This
+        # is implementation specific to the asyncio library; rather async and await
+        # methods are just coroutines and yielding values is fine! Since we can
+        # orchestrate the coroutine entirely on our own from kernel_main, the underlying
+        # event loop never sees the yielded value, and we're free to use async/await
+        # syntax for coroutines like we want :)
+        #
+        # when kernel_main does `send`, yield returns a value, ie. the service call result;
+        # that's what we return here, and then awaiting on the ServiceCall gives the
+        # return value from the actual call.
+        #
+        # It's possible that there should be a debug flag which shows the full stack trace
+        # (current behavior) but by default remove the kernel aspects; they're already
+        # muddying the stack quite a bit, but at least for now it's still informative.
+        return (yield self)
 
 
-def service_call_stub(service, async_fn):
-    async def stub(args, kwargs):
-        # we want to grab the execution context right before we yield up to
-        # the kernel. this isn't a security issue but a usability one: if we
-        # do this at the wrong time it will lead to really hard to trace timing
-        # bugs with wrong contexts, and they'll likely be wrong in scary ways, ie.
-        # not system-insecure but specifically different than the user wanted.
+async def execute_service_call(service, endpoint_handle, args, kwargs):
+    """Do arg resolution, build and yield ServiceCall based on current execution context."""
+    # We want to be very specific about when we grab the execution context
+    # this isn't a security issue from a sytem standpoint since the kernel will
+    # get to validate that the EC we're passing; however if it's done at the wrong
+    # time, for instance if some callback is executed that switches the active EC
+    # in subtle way, we'll introduce a really hard to grok permissions bug where
+    # we're giving permissions the user doesn't expect.
 
-        # also, remove args[0] which is client.self
-        return await ServiceCall(
-            current_execution_context(), service, async_fn.__name__, args[1:], kwargs
-        )
-
-    return stub
-
-
-async def execute_service_call(stub, args, kwargs):
+    # In this case since we wait for all of these to fully resolve, they shouldn't
+    # be able to leak a context where we changed EC, so we can grab current EC after.
     args, kwargs = await resolve_args(args, kwargs)
-    return await stub(args, kwargs)
+
+    # remove args[0] which is client.self
+    return await ServiceCall(
+        current_execution_context(), service, endpoint_handle.__name__, args[1:], kwargs
+    )
 
 
 def wrap_service_call(
-    service: any,  # Something; this is an ID of what service we're calling
-    async_fn: Callable[..., Awaitable[T]],
+    service: str,
+    endpoint_handle: Callable[..., Awaitable[T]],
 ) -> Callable[..., ServiceResult[T]]:
-    return_annotation = inspect.signature(async_fn).return_annotation
+    """Replaces an async method on a service interface with one which actually executes
+    the service call."""
+    # Do as much work outside of wrapper as we can since this will be critical path
+    # for every service call.
+    return_annotation = inspect.signature(endpoint_handle).return_annotation
     return_type = (
         any if return_annotation is inspect.Signature.empty else return_annotation
     )
 
-    stub = service_call_stub(service, async_fn)
-
-    @functools.wraps(async_fn)
+    @functools.wraps(endpoint_handle)
     def wrapper(*args, **kwargs) -> ServiceResult[return_type]:
-        # TODO: this currently resolves args in thread, which undoes any benefit of time traveling
-        handle = execute_service_call(stub, args, kwargs)
+        handle = execute_service_call(service, endpoint_handle, args, kwargs)
         return ServiceResult[return_type](handle)
 
     return wrapper
@@ -367,106 +338,3 @@ class Service(metaclass=ServiceMeta):
     with a guiding principle that practicality wins except in cases where we can make fundamentally more
     powerful tools through a stronger assumption that might make things less practical.
     """
-
-
-# TODO: Errors should be nice, eg. "did you mean...?"
-class Error(Exception):
-    """Base service call error."""
-
-
-class ServiceNotFound(Error):
-    """Didn't find the service in the services lookup."""
-
-
-class ServiceDidNotStart(Error):
-    """There was a failure starting a backend for the service."""
-
-
-class ServiceHadNoMatchingEndpoint(Error):
-    """The service backend for that service didn't have the requested method endpoint."""
-
-
-class InvalidExecutionContextRequested(Error):
-    """The execution context requested in the service call asked for permissions it
-    doesn't have."""
-
-
-def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionContext):
-    """Do security checks; if the requested execution context requests more permissions
-    than the current one, reject it and raise an exception."""
-    # For now just checking that we're not breaking chroot.
-    abs_root = ec.root.resolve()
-    requested_root = requested_ec.root.resolve()
-    if not requested_root.is_relative_to(abs_root):
-        raise InvalidExecutionContextRequested(
-            f"New root was not a subset of the old root: {requested_ec.root}"
-        )
-
-
-async def lookup_service_backend(service: str) -> Service:
-    """Look up the requesteb backend service. If it's not already running, start it."""
-    if service not in ServiceMeta.SERVICES:
-        raise ServiceNotFound(service)
-    backend_class = ServiceMeta.SERVICES[service]
-    try:
-        # TODO: currently just constructing a new backend instance every time
-        return ServiceMeta.SERVICES[service]()
-    except Exception as e:
-        raise ServiceDidNotStart(service) from e
-
-
-async def handle_service_call(service_call: ServiceCall) -> any:
-    """
-    1. validate and set the execution context
-    2. find and/or set up the backend service
-    3. schedule and await on the service call
-    4. save result to service_call_result
-    """
-    requested_ec = service_call.execution_context
-    validate_execution_context(current_execution_context(), requested_ec)
-    backend = await lookup_service_backend(service_call.service)
-    if not hasattr(backend, service_call.endpoint):
-        raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
-    endpoint = getattr(backend, service_call.endpoint)
-    # what if the endpoint itself is making service calls? I think that's next up :P
-    with requested_ec.active():
-        return await endpoint(*service_call.args, **service_call.kwargs)
-
-
-async def kernel_main(main: Coroutine):
-    """Orchestrates a program (main), allowing it to yield ServiceCall objects,
-    which are then executed and the results sent back to the coroutine.
-    Also manages execution context including validation and security checks,
-    and manages looking up (and possibly starting) service backends.
-
-    Make sure to use fine grained errors.
-    Also, tracebacks are good! System should be developer friendly,
-    err on the side of more info even if it exposes system internals.
-    """
-    # We need to decide whether to .send or .throw depending on whether there was an
-    # error executing the service call. Sending exceptions via .throw allows programs
-    # to handle service call exceptions normally and potentially recover.
-    # On the first pass we send(None) to start the coroutine.
-    service_call_result = None
-    last_service_call_threw = False
-
-    while True:
-        # Execute the main program until it yields a ServiceCall object.
-        # When send or throw raise StopIteration, the program has exited.
-        try:
-            if last_service_call_threw:
-                service_call = main.throw(
-                    type(service_call_result), service_call_result
-                )
-            else:
-                service_call = main.send(service_call_result)
-        except StopIteration:
-            return
-        last_service_call_threw = False
-
-        # The program made a service call.
-        try:
-            service_call_result = await handle_service_call(service_call)
-        except Exception as e:
-            service_call_result = e
-            last_service_call_threw = True

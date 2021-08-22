@@ -2,9 +2,11 @@ import dataclasses
 from pathlib import Path
 
 # hmmm probably not quite right but this is how I'll do it for now :)
-from service import current_execution_context, kernel_main, User
 
-from file_service import FileMetadata, Files2
+from execution_context import current_execution_context, User
+from kernel_main import kernel_main
+
+from file_service import Files2
 
 # This should be standard and adapted for services also :)
 @dataclasses.dataclass

@@ -1,9 +1,10 @@
-import contextlib
 import dataclasses
 from pathlib import Path
-import typing
-from service import ExecutionContext, Service, current_execution_context, kernel_main
 import time
+import typing
+
+from execution_context import ExecutionContext, current_execution_context
+from service import Service
 
 
 T = typing.TypeVar("T")
@@ -116,6 +117,9 @@ class Files2(Files):
     # "priveleged" code.
     #
     # This probably isn't the best way to store state on the backend classes :)
+    # So next I really need to figure out how Services get configured, so eg.
+    # I can have an instance of this in the unit tests that doesn't just overwrite
+    # files created by the shell xDDD
     _data: dict[Path, FileRecord] = {}
 
     @staticmethod
@@ -166,6 +170,14 @@ class Files2(Files):
             old_record = data[path]
             record.metadata.creation_time = old_record.metadata.creation_time
         data[path] = record
+
+    async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
+        path = self.resolve_path(current_execution_context(), path)
+        return [
+            (filepath, record.metadata)
+            for filepath, record in self._data
+            if path == filepath.parent
+        ]
 
     def change_directory(self, path: Path):
         return dataclasses.replace(

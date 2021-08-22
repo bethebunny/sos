@@ -1,7 +1,8 @@
+from execution_context import current_execution_context
 import functools
 from pathlib import Path
 from file_service import File, Files2
-from service import kernel_main
+from kernel_main import kernel_main
 
 import pytest
 
@@ -117,16 +118,28 @@ async def test_shared_file_backend():
 @async_kernel_test
 async def test_execution_context_change_directory(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
-    with files.change_directory(Path("/a")):
-        assert (await files.read(Path("b/c"))).value == "stuff"
-        assert (await files.read(Path("/a/b/c"))).value == "stuff"
+    with current_execution_context().full().active():
+        with files.change_directory(Path("/a")):
+            assert (await files.read(Path("b/c"))).value == "stuff"
+            assert (await files.read(Path("/a/b/c"))).value == "stuff"
 
 
 @async_kernel_test
 async def test_execution_context_change_directory_relative_access(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
-    with files.change_directory(Path("/a/b/d")):
-        assert (await files.read(Path("../c"))).value == "stuff"
+    with current_execution_context().full().active():
+        with files.change_directory(Path("/a/b/d")):
+            assert (await files.read(Path("../c"))).value == "stuff"
+
+
+@async_kernel_test
+async def test_execution_context_change_directory_sandbox(files):
+    await files.write(Path("/a/b/c"), File[str]("stuff"))
+    with files.change_directory(Path("/a")):
+        assert (await files.read(Path("b/c"))).value == "stuff"
+        assert (await files.read(Path("/b/c"))).value == "stuff"
+        with pytest.raises(KeyError):
+            await files.read(Path("/a/b/c"))
 
 
 @async_kernel_test

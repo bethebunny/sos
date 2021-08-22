@@ -29,8 +29,11 @@ class ExecutionContext:
     user: User
     root: Path
     working_directory: Path
+    # if sandbox, then by default activating will chroot
+    sandbox: bool = True
 
-    def chroot(self, new_root: Optional[Path] = None):
+    def chroot(self, new_root: Optional[Path] = None) -> "ExecutionContext":
+        # change root to new_root or working_directory
         if new_root is None:
             new_root = self.working_directory
         if new_root.is_absolute():
@@ -46,7 +49,7 @@ class ExecutionContext:
         print(f"Activating {self}")
         global _EXECUTION_CONTEXT
         old_execution_context = _EXECUTION_CONTEXT
-        _EXECUTION_CONTEXT = self
+        _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
         try:
             yield
         finally:

@@ -7,9 +7,6 @@ from kernel_main import kernel_main
 import pytest
 
 
-# TODO: test fixture for Files2() that clears out the backend
-
-
 @pytest.fixture
 def files():
     Files2._backend = None
@@ -26,21 +23,18 @@ def async_kernel_test(test_fn):
 
 @async_kernel_test
 async def test_service_simple(files):
-    async def test():
-        pointer_path = Path("/path-to-write")
-        path = Path("/a/b/c")
+    pointer_path = Path("/path-to-write")
+    path = Path("/a/b/c")
 
-        await files.write(pointer_path, File[Path](path))
-        pointer_contents = await files.read(pointer_path).value
-        assert pointer_contents == path
+    await files.write(pointer_path, File[Path](path))
+    pointer_contents = await files.read(pointer_path).value
+    assert pointer_contents == path
 
-        # don't do lazy eval; explicitly await on service call result
-        path_to_write = await files.read(pointer_path).value
-        await files.write(path_to_write, File[str]("we did it!"))
-        result = await files.read(path).value
-        assert result == "we did it!"
-
-    await kernel_main(test())
+    # don't do lazy eval; explicitly await on service call result
+    path_to_write = await files.read(pointer_path).value
+    await files.write(path_to_write, File[str]("we did it!"))
+    result = await files.read(path).value
+    assert result == "we did it!"
 
 
 @async_kernel_test

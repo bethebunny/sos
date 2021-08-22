@@ -1,5 +1,7 @@
+import functools
 from pathlib import Path
 from file_service import File, Files2
+from service import kernel_main
 
 import pytest
 
@@ -13,23 +15,34 @@ def files():
     return Files2()
 
 
-@pytest.mark.asyncio
+def async_kernel_test(test_fn):
+    @functools.wraps(test_fn)
+    async def wrapped(*args, **kwargs):
+        return await kernel_main(test_fn(*args, **kwargs))
+
+    return pytest.mark.asyncio(wrapped)
+
+
+@async_kernel_test
 async def test_service_simple(files):
-    pointer_path = Path("/path-to-write")
-    path = Path("/a/b/c")
+    async def test():
+        pointer_path = Path("/path-to-write")
+        path = Path("/a/b/c")
 
-    await files.write(pointer_path, File[Path](path))
-    pointer_contents = await files.read(pointer_path).value
-    assert pointer_contents == path
+        await files.write(pointer_path, File[Path](path))
+        pointer_contents = await files.read(pointer_path).value
+        assert pointer_contents == path
 
-    # don't do lazy eval; explicitly await on service call result
-    path_to_write = await files.read(pointer_path).value
-    await files.write(path_to_write, File[str]("we did it!"))
-    result = await files.read(path).value
-    assert result == "we did it!"
+        # don't do lazy eval; explicitly await on service call result
+        path_to_write = await files.read(pointer_path).value
+        await files.write(path_to_write, File[str]("we did it!"))
+        result = await files.read(path).value
+        assert result == "we did it!"
+
+    await kernel_main(test())
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_getattr_lazy_service_results(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -45,7 +58,7 @@ async def test_getattr_lazy_service_results(files):
     assert result == "we did it!"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_apply_lazy_service_results(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -64,7 +77,7 @@ async def test_apply_lazy_service_results(files):
     assert result == "we did it!"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_apply_with_service_call(files):
     from functools import partial
 
@@ -82,7 +95,7 @@ async def test_apply_with_service_call(files):
     assert result == "we did it!"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_shared_file_backend():
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -101,7 +114,7 @@ async def test_shared_file_backend():
     assert result == "we did it!"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_execution_context_change_directory(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     with files.change_directory(Path("/a")):
@@ -109,14 +122,14 @@ async def test_execution_context_change_directory(files):
         assert (await files.read(Path("/a/b/c"))).value == "stuff"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_execution_context_change_directory_relative_access(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     with files.change_directory(Path("/a/b/d")):
         assert (await files.read(Path("../c"))).value == "stuff"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_execution_context_change_root(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     assert (await files.read(Path("/a/b/c"))).value == "stuff"
@@ -124,16 +137,17 @@ async def test_execution_context_change_root(files):
         assert (await files.read(Path("/c"))).value == "stuff"
 
 
-@pytest.mark.asyncio
+@async_kernel_test
 async def test_execution_context_change_root_hides_original_root(files):
     await files.write(Path("/a/secret"), File[str]("stuff"))
     assert (await files.read(Path("/a/secret"))).value == "stuff"
     with files.change_root(Path("/a/b")):
         with pytest.raises(KeyError):
-            result = await files.read(Path("/a/secret"))
+            await files.read(Path("/a/secret"))
 
 
 @pytest.mark.asyncio
+@async_kernel_test
 async def test_execution_context_change_root_stops_relative_access(files):
     await files.write(Path("/a/secret"), File[str]("stuff"))
     assert (await files.read(Path("/a/secret"))).value == "stuff"

@@ -4,7 +4,7 @@ import functools
 import inspect
 from pathlib import Path
 import typing
-from typing import Awaitable, Callable, Generic, Optional
+from typing import Awaitable, Callable, Coroutine, Generic, Optional
 
 T = typing.TypeVar("T")
 
@@ -214,35 +214,76 @@ async def resolve_args(args, kwargs):
     )
 
 
-async def execute_service_call(async_fn, args, kwargs):
+@dataclasses.dataclass
+class ServiceCall:
+    execution_context: ExecutionContext
+    # not sure what these types are yet
+    service: any
+    endpoint: any
+    args: list[any]
+    kwargs: dict[str, any]
+
+    def __await__(self):
+        result = yield self
+        return result
+
+
+def service_call_stub(service, async_fn):
+    async def stub(args, kwargs):
+        # we want to grab the execution context right before we yield up to
+        # the kernel. this isn't a security issue but a usability one: if we
+        # do this at the wrong time it will lead to really hard to trace timing
+        # bugs with wrong contexts, and they'll likely be wrong in scary ways, ie.
+        # not system-insecure but specifically different than the user wanted.
+
+        # also, remove args[0] which is client.self
+        return await ServiceCall(
+            current_execution_context(), service, async_fn.__name__, args[1:], kwargs
+        )
+
+    return stub
+
+
+async def execute_service_call(stub, args, kwargs):
     args, kwargs = await resolve_args(args, kwargs)
-    return await async_fn(*args, **kwargs)
+    return await stub(args, kwargs)
 
 
 def wrap_service_call(
-    async_fn: Callable[..., Awaitable[T]]
+    service: any,  # Something; this is an ID of what service we're calling
+    async_fn: Callable[..., Awaitable[T]],
 ) -> Callable[..., ServiceResult[T]]:
     return_annotation = inspect.signature(async_fn).return_annotation
     return_type = (
         any if return_annotation is inspect.Signature.empty else return_annotation
     )
 
+    stub = service_call_stub(service, async_fn)
+
     @functools.wraps(async_fn)
     def wrapper(*args, **kwargs) -> ServiceResult[return_type]:
-        handle = execute_service_call(async_fn, args, kwargs)
+        # TODO: this currently resolves args in thread, which undoes any benefit of time traveling
+        handle = execute_service_call(stub, args, kwargs)
         return ServiceResult[return_type](handle)
 
     return wrapper
 
 
 class ServiceMeta(type):
+    SERVICES = {}
+
     def __new__(cls, name, bases, dict):
+        print(name)
+        # Register a backend service which just executes the service code as-is
+        cls.SERVICES[name] = super().__new__(cls, name, bases, dict)
+
+        # Return a client
         return super().__new__(
             cls,
             name,
             bases,
             {
-                k: wrap_service_call(v) if inspect.iscoroutinefunction(v) else v
+                k: wrap_service_call(name, v) if inspect.iscoroutinefunction(v) else v
                 for k, v in dict.items()
             },
         )
@@ -279,6 +320,9 @@ class Service(metaclass=ServiceMeta):
     powerful tools through a stronger assumption that might make things less practical.
     """
 
+    # Remove this for now; I think it's deletable but not 100% yet. If you see this comment that
+    # means you can delete it all :)
+    """
     _backend = None
 
     @classmethod
@@ -288,9 +332,60 @@ class Service(metaclass=ServiceMeta):
         if cls._backend is None:
             cls._backend = cls.Backend()
         return cls._backend
-
     def __init__(self, execution_context: Optional[ExecutionContext] = None):
         # Default execution context is the current user in a chroot of the current working directory
         self._execution_context = (
             execution_context or current_execution_context().chroot()
         )
+    """
+
+
+async def kernel_main(main: Coroutine):
+    root_ec = ExecutionContext(User("root"), Path("/"), Path("/"))
+    # (the name for this function is almost certainly wrong right now)
+    # okay, so the plan here is
+    #   - "main" is some coroutine
+    #   - "service calls" need to actually _yield_ something
+    #   - this code manually orchestrates their execution in yielding
+    #   - it maintains execution context and manages passing service calls to backends
+
+    EXIT = object()
+
+    # when send raises StopIteration we're done
+    def send(coro, value, threw):
+        try:
+            if threw:
+                return coro.throw(type(value), value)
+            else:
+                return coro.send(value)
+        except StopIteration:
+            return EXIT
+
+    # kicking service calls (.send(None)) might be a way to start them without yielding? idk yet
+    service_call_result = None
+    # threw is annoying state management to decide whether to .send a value or to
+    # .throw an exception; both continue the coroutine and we need to treat the returns
+    # the same way.
+    threw = False
+    while (service_call := send(main, service_call_result, threw)) is not EXIT:
+        threw = False
+        # 1. get the right execution context
+        # TODO: verify that requested ec is a subset of permissions of ec
+        requested_ec = service_call.execution_context
+        # TODO: finer grained errors; tracebacks are good, system should be developer friendly
+        try:
+            # 2. find or set up the backend service
+            # TODO: currently just constructing a new backend instance every time
+            backend = ServiceMeta.SERVICES[service_call.service]()
+            endpoint = getattr(backend, service_call.endpoint)
+            # 3. schedule and await on the service call
+            # 4. save result to service_call_result
+            with requested_ec.active():
+                # args has a reference to the client instance
+                service_call_result = await endpoint(
+                    *service_call.args, **service_call.kwargs
+                )
+        except Exception as e:
+            # Instead of `send`, the next loop needs to use `throw`.
+            service_call_result = e
+            threw = True

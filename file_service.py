@@ -2,7 +2,7 @@ import contextlib
 import dataclasses
 from pathlib import Path
 import typing
-from service import ExecutionContext, Service, current_execution_context
+from service import ExecutionContext, Service, current_execution_context, kernel_main
 import time
 
 
@@ -74,7 +74,7 @@ class Files(Service):
     async def read(self, path: Path) -> File:
         pass
 
-    async def write(self, path: Path, file: File):
+    async def write(self, path: Path, file: File) -> None:
         pass
 
     async def append(self, path: Path, T):
@@ -107,20 +107,16 @@ class FileRecord:
 
 
 class Files2(Files):
-    @dataclasses.dataclass
-    class Backend:
-        # We shouldn't actually have a "Backend" class. The Service definition
-        # class is both an interface/client and the implementation.
-        # When you define a Service class, the metaclass creates the separate
-        # implementations, and yields a thin client interface. When yielding
-        # out to the service calls, the kernel code will be able to look at
-        # the ExecutionContext for the yielding task and pass it to the "backend"
-        # implementation. This backend is the one that's actually able to run
-        # "priveleged" code.
-        #
-        # In the meantime I'm going to get tests passing with this implementation and commit
-        # and then the next change will be to create this bifurcation.
-        data: dict[Path, FileRecord] = dataclasses.field(default_factory=dict)
+    # The Service definition class is both an interface/client and the implementation.
+    # When you define a Service class, the metaclass creates the separate
+    # implementations, and this becomes a thin client interface. When yielding
+    # out to the service calls, the kernel code will be able to look at
+    # the ExecutionContext for the yielding task and pass it to the "backend"
+    # implementation. This backend is the one that's actually able to run
+    # "priveleged" code.
+    #
+    # This probably isn't the best way to store state on the backend classes :)
+    _data: dict[Path, FileRecord] = {}
 
     @staticmethod
     def resolve_path(ec: ExecutionContext, path: Path) -> Path:
@@ -142,7 +138,7 @@ class Files2(Files):
 
     async def stat(self, path: Path) -> FileMetadata:
         path = self.resolve_path(current_execution_context(), path)
-        return self.backend().data[path].metadata
+        return self._data[path].metadata
 
     # I'm pretty sure if we're going through the trouble of having structured
     # files, which is _pretty sweet_, we can make the interfaces more typed
@@ -151,11 +147,11 @@ class Files2(Files):
     # more aware of the file metadata rather than just a byte stream.
     async def read(self, path: Path) -> File:
         path = self.resolve_path(current_execution_context(), path)
-        return self.backend().data[path].file
+        return self._data[path].file
 
-    async def write(self, path: Path, file: File):
+    async def write(self, path: Path, file: File) -> None:
         path = self.resolve_path(current_execution_context(), path)
-        data = self.backend().data
+        data = self._data
         record = FileRecord(
             metadata=FileMetadata(
                 # Unsure where __orig_class__ comes from, possibly dataclass

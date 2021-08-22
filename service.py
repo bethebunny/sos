@@ -1,9 +1,10 @@
+import contextlib
 import dataclasses
 import functools
 import inspect
-import pathlib
+from pathlib import Path
 import typing
-from typing import Awaitable, Callable, Generic
+from typing import Awaitable, Callable, Generic, Optional
 
 T = typing.TypeVar("T")
 
@@ -13,11 +14,61 @@ class User:
     name: str
 
 
-@dataclasses.dataclass
+ROOT = User("root")
+
+
+# The user _should not_ be able to possibly use an execution context
+# that's not a subset of the permissions of their own execution context.
+# Obviously this implementation doesn't do that yet.
+#
+# For the intended api is eg.
+# with current_execution_context().replace(user=User("stef"), root="/home/stef"):
+#     files = Files()
+@dataclasses.dataclass(frozen=True)
 class ExecutionContext:
     user: User
-    root: pathlib.Path
-    working_directory: pathlib.Path
+    root: Path
+    working_directory: Path
+
+    def chroot(self, new_root: Optional[Path] = None):
+        if new_root is None:
+            new_root = self.working_directory
+        if new_root.is_absolute():
+            new_root = new_root.relative_to("/")
+        return dataclasses.replace(
+            self,
+            root=self.root.joinpath(new_root),
+            working_directory=Path("/"),
+        )
+
+    @contextlib.contextmanager
+    def active(self):
+        print(f"Activating {self}")
+        global _EXECUTION_CONTEXT
+        old_execution_context = _EXECUTION_CONTEXT
+        _EXECUTION_CONTEXT = self
+        try:
+            yield
+        finally:
+            _EXECUTION_CONTEXT = old_execution_context
+
+
+_EXECUTION_CONTEXT = ExecutionContext(ROOT, Path("/"), Path("/"))
+
+# WARNING: THING ABOUT THIS A LOT SOMETIME
+# Potential for security holes here. For instance, if we can pass a callback
+# to a service and get it to execute it, and that callback grabs execution context,
+# we could leak or allow setting an execution context that's not ours.
+def current_execution_context():
+    return _EXECUTION_CONTEXT
+
+
+# TODO:
+#   - tasks aren't actually scheduled until they're awaited on
+#   - when an exception is thrown, un-awaited tasks leak (should be cancelled)
+#   - if a call exits without awaiting on a task, that task should still complete
+#       - but don't await on it; we _should_ be able to do things like say "log this later"
+#       - probably better to make this explicit, ie. you have to mark anything you're not waiting on
 
 
 class ServiceResultBase(Awaitable[T]):
@@ -227,3 +278,19 @@ class Service(metaclass=ServiceMeta):
     with a guiding principle that practicality wins except in cases where we can make fundamentally more
     powerful tools through a stronger assumption that might make things less practical.
     """
+
+    _backend = None
+
+    @classmethod
+    def backend(cls) -> "Service":
+        # For now assume single event loop so we don't need to worry about creating
+        # and leaking multiple backends
+        if cls._backend is None:
+            cls._backend = cls.Backend()
+        return cls._backend
+
+    def __init__(self, execution_context: Optional[ExecutionContext] = None):
+        # Default execution context is the current user in a chroot of the current working directory
+        self._execution_context = (
+            execution_context or current_execution_context().chroot()
+        )

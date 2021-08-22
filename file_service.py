@@ -1,8 +1,8 @@
-import asyncio
+import contextlib
 import dataclasses
 from pathlib import Path
 import typing
-from service import Service
+from service import ExecutionContext, Service, current_execution_context
 import time
 
 
@@ -107,11 +107,42 @@ class FileRecord:
 
 
 class Files2(Files):
-    def __init__(self):
-        self._data: dict[Path, FileRecord] = {}
+    @dataclasses.dataclass
+    class Backend:
+        # We shouldn't actually have a "Backend" class. The Service definition
+        # class is both an interface/client and the implementation.
+        # When you define a Service class, the metaclass creates the separate
+        # implementations, and yields a thin client interface. When yielding
+        # out to the service calls, the kernel code will be able to look at
+        # the ExecutionContext for the yielding task and pass it to the "backend"
+        # implementation. This backend is the one that's actually able to run
+        # "priveleged" code.
+        #
+        # In the meantime I'm going to get tests passing with this implementation and commit
+        # and then the next change will be to create this bifurcation.
+        data: dict[Path, FileRecord] = dataclasses.field(default_factory=dict)
+
+    @staticmethod
+    def resolve_path(ec: ExecutionContext, path: Path) -> Path:
+        # Hmm awkward. If you are switching chroots all of the time,
+        # then paths are weird to keep track of. For instance if I output
+        # a path name running in a sandbox, I want the user to _know_ that
+        # it's a relative path to the working directory.
+        if path.is_absolute():
+            abspath = ec.root.joinpath(path.relative_to("/"))
+        else:
+            print(ec)
+            abspath = ec.root.joinpath(ec.working_directory.relative_to("/")).joinpath(
+                path
+            )
+        abspath = abspath.resolve()
+        if not abspath.is_relative_to(ec.root):
+            raise ValueError(f"path {path} referenced above root")
+        return abspath
 
     async def stat(self, path: Path) -> FileMetadata:
-        return self._data[path].metadata
+        path = self.resolve_path(current_execution_context(), path)
+        return self.backend().data[path].metadata
 
     # I'm pretty sure if we're going through the trouble of having structured
     # files, which is _pretty sweet_, we can make the interfaces more typed
@@ -119,9 +150,12 @@ class Files2(Files):
     # and almost certainly whatever "read" is should return an object which is
     # more aware of the file metadata rather than just a byte stream.
     async def read(self, path: Path) -> File:
-        return self._data[path].file
+        path = self.resolve_path(current_execution_context(), path)
+        return self.backend().data[path].file
 
     async def write(self, path: Path, file: File):
+        path = self.resolve_path(current_execution_context(), path)
+        data = self.backend().data
         record = FileRecord(
             metadata=FileMetadata(
                 # Unsure where __orig_class__ comes from, possibly dataclass
@@ -132,10 +166,20 @@ class Files2(Files):
             ),
             file=file,
         )
-        if path in self._data:
-            old_record = self._data[path]
+        if path in data:
+            old_record = data[path]
             record.metadata.creation_time = old_record.metadata.creation_time
-        self._data[path] = record
+        data[path] = record
+
+    def change_directory(self, path: Path):
+        return dataclasses.replace(
+            current_execution_context(),
+            working_directory=self.resolve_path(current_execution_context(), path),
+        ).active()
+
+    def change_root(self, path: Path):
+        # Hmm this won't set the execution context for self anyway :/
+        return current_execution_context().chroot(path).active()
 
 
 class Window:

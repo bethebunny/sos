@@ -55,7 +55,7 @@ class ExecutionContext:
 
 _EXECUTION_CONTEXT = ExecutionContext(ROOT, Path("/"), Path("/"))
 
-# WARNING: THING ABOUT THIS A LOT SOMETIME
+# WARNING: THINK ABOUT THIS A LOT SOMETIME
 # Potential for security holes here. For instance, if we can pass a callback
 # to a service and get it to execute it, and that callback grabs execution context,
 # we could leak or allow setting an execution context that's not ours.
@@ -127,6 +127,30 @@ class ServiceResultBase(Awaitable[T]):
 
 
 class ServiceResult(ServiceResultBase, Awaitable[T]):
+    """ServiceResult is the Awaitable / promise type which Service client stub methods
+    return. They act like promises moreso than Awaitables, in that you can await on them
+    as many times as you want, and they'll retain a reference to their result value until
+    they're garbage collected.
+
+    ServiceResults are also special in how they're handled by SystemCalls.
+    There's some set of operations that can be done on them; currently
+        1. attribute access (eg. `result.value`)
+        2. item lookup (eg. `result["key"]` or `result[-3:]`)
+        3. function chaining via .apply, eg. result.apply(lambda x: x + 1)
+
+    The result of any of these operations will give another ServiceResult object
+    (technically a ServiceResultBase object), which can also be Awaited on.
+
+    Even more importantly though, _these values can be passed into other service calls_.
+    So you don't have to wait on your other service calls to get back, you can start
+    computing on the future results of those things and start sending off even more
+    service calls to be scheduled! The services passed ServiceResult objects as arguments
+    will know how to resolve them, so eg. in cases where there's a large lag time between
+    services, you can batch an entire graph of service calls and computations to the
+    service (or several) and ship them all off at once, only waiting on the round trip
+    a single time!
+    """
+
     def __init__(self, handle: Awaitable[T]):
         super().__init__()
         self._handle = handle
@@ -140,10 +164,13 @@ P = typing.TypeVar("P")
 
 
 class DerivedServiceResult(ServiceResultBase[T], Generic[P, T]):
+    """Base class for derived computations done on ServiceResults."""
+
     async def compute_result(self) -> T:
         return await self.compute_result_from_parent(await self.parent)
 
     async def compute_result_from_parent(self, parent: P) -> T:
+        """More useful function for defining derived computations."""
         raise NotImplemented
 
 
@@ -189,6 +216,7 @@ class ServiceResultApply(DerivedServiceResult[P, T]):
 
 
 async def resolve_result(result):
+    """Resolve a ServiceResult to a result value."""
     # if we return a ServiceResult, we want to resolve it to a real value
     while isinstance((result := await result), ServiceResultBase):
         pass
@@ -196,6 +224,10 @@ async def resolve_result(result):
 
 
 async def resolve_args(args, kwargs):
+    """Replace any ServiceResults in args and kwargs with resolved values.
+    This lets us move from "maybe there's some promises mixed in" ServiceResult land
+    to "all values are now real and we can do whatever normal computation we want".
+    """
     return (
         # In theory this should be a `tuple`, but we're splatting it anyway,
         # and list comprehensions are supported via https://www.python.org/dev/peps/pep-0530/
@@ -217,13 +249,13 @@ async def resolve_args(args, kwargs):
 @dataclasses.dataclass
 class ServiceCall:
     execution_context: ExecutionContext
-    # not sure what these types are yet
-    service: any
-    endpoint: any
+    service: str
+    endpoint: str
     args: list[any]
     kwargs: dict[str, any]
 
     def __await__(self):
+        # TODO: document why this is this way, it's very particular and I have a cat :)
         result = yield self
         return result
 
@@ -290,8 +322,29 @@ class ServiceMeta(type):
 
 
 class Service(metaclass=ServiceMeta):
-    """A Service is a class which defines a service interface.
-    ??? I still need to decide about "interfaces" vs "implementation", for instance
+    """Service is the core class for implementing OS behaviors, and pretty much anything else.
+
+    Subclasses of Service should (for now) have a zero-arg constructor that sets up an instance
+    of the class. TODO: stubs should not do the same initialization the backend does >.>
+
+    A Service implementation will have some async methods on it. Service subclasses handle async
+    methods specially, and calling those methods will return a `ServiceResult[T] <: Awaitable[T]`
+    rather than an `Awaitable[T]`.
+
+    When you create a Service subclass, the resulting type will be a "service stub" or a client.
+    What this means is that any methods which are `async` are replaced with a "stub" version of
+    that method, which when it is called and awaited will yield a SystemCall object.
+
+    The ServiceMeta.SERVICES registry (for now, this will deeeeefinitely change, hopefully soon)
+    _also_ keeps a record of the original class type as defined. This is the "backend" service
+    implementation which is constructed to actually run system calls.
+
+    When the kernel executes a SystemCall, it will call the method on the backend instance with
+    the args provided by the SystemCall object.
+
+
+    Other thoughts for the continuing development of services and related tooling:
+
     it should be possible to define "service decorators", and your system should primarily be configured by
         1. determining which services are present and
         2. determining how those services are implemented
@@ -301,91 +354,116 @@ class Service(metaclass=ServiceMeta):
     I think I kinda like the "capabilities" style better?
     What if you want multiple implementations of the same service?
 
-
-    ... IN ANY CASE
-
-    >>> Real non-crazy docs here
-    A Service implementation will have some async methods on it. Service subclasses handle async
-    methods specially, and calling those methods will return a `ServiceResult[T] <: Awaitable[T]`
-    rather than an `Awaitable[T]`.
-    <<<
-
     How does state management work? Certainly "client"s should not have substantial state; however
     it seems likely that the backend Service instances might have important state.
 
     Should we expect that connections are sticky? Expect that they're transient and that services
-    should be ~stateless even if they have important state/setup? BLAH SO MANY DECISIONS
+    should be ~stateless even if they have important state/setup?
+
     I think the best option is to not make any too strong of assumptions about this yet, but go forward
     with a guiding principle that practicality wins except in cases where we can make fundamentally more
     powerful tools through a stronger assumption that might make things less practical.
     """
 
-    # Remove this for now; I think it's deletable but not 100% yet. If you see this comment that
-    # means you can delete it all :)
-    """
-    _backend = None
 
-    @classmethod
-    def backend(cls) -> "Service":
-        # For now assume single event loop so we don't need to worry about creating
-        # and leaking multiple backends
-        if cls._backend is None:
-            cls._backend = cls.Backend()
-        return cls._backend
-    def __init__(self, execution_context: Optional[ExecutionContext] = None):
-        # Default execution context is the current user in a chroot of the current working directory
-        self._execution_context = (
-            execution_context or current_execution_context().chroot()
+# TODO: Errors should be nice, eg. "did you mean...?"
+class Error(Exception):
+    """Base service call error."""
+
+
+class ServiceNotFound(Error):
+    """Didn't find the service in the services lookup."""
+
+
+class ServiceDidNotStart(Error):
+    """There was a failure starting a backend for the service."""
+
+
+class ServiceHadNoMatchingEndpoint(Error):
+    """The service backend for that service didn't have the requested method endpoint."""
+
+
+class InvalidExecutionContextRequested(Error):
+    """The execution context requested in the service call asked for permissions it
+    doesn't have."""
+
+
+def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionContext):
+    """Do security checks; if the requested execution context requests more permissions
+    than the current one, reject it and raise an exception."""
+    # For now just checking that we're not breaking chroot.
+    abs_root = ec.root.resolve()
+    requested_root = requested_ec.root.resolve()
+    if not requested_root.is_relative_to(abs_root):
+        raise InvalidExecutionContextRequested(
+            f"New root was not a subset of the old root: {requested_ec.root}"
         )
+
+
+async def lookup_service_backend(service: str) -> Service:
+    """Look up the requesteb backend service. If it's not already running, start it."""
+    if service not in ServiceMeta.SERVICES:
+        raise ServiceNotFound(service)
+    backend_class = ServiceMeta.SERVICES[service]
+    try:
+        # TODO: currently just constructing a new backend instance every time
+        return ServiceMeta.SERVICES[service]()
+    except Exception as e:
+        raise ServiceDidNotStart(service) from e
+
+
+async def handle_service_call(service_call: ServiceCall) -> any:
     """
+    1. validate and set the execution context
+    2. find and/or set up the backend service
+    3. schedule and await on the service call
+    4. save result to service_call_result
+    """
+    requested_ec = service_call.execution_context
+    validate_execution_context(current_execution_context(), requested_ec)
+    backend = await lookup_service_backend(service_call.service)
+    if not hasattr(backend, service_call.endpoint):
+        raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
+    endpoint = getattr(backend, service_call.endpoint)
+    # what if the endpoint itself is making service calls? I think that's next up :P
+    with requested_ec.active():
+        return await endpoint(*service_call.args, **service_call.kwargs)
 
 
 async def kernel_main(main: Coroutine):
-    root_ec = ExecutionContext(User("root"), Path("/"), Path("/"))
-    # (the name for this function is almost certainly wrong right now)
-    # okay, so the plan here is
-    #   - "main" is some coroutine
-    #   - "service calls" need to actually _yield_ something
-    #   - this code manually orchestrates their execution in yielding
-    #   - it maintains execution context and manages passing service calls to backends
+    """Orchestrates a program (main), allowing it to yield ServiceCall objects,
+    which are then executed and the results sent back to the coroutine.
+    Also manages execution context including validation and security checks,
+    and manages looking up (and possibly starting) service backends.
 
-    EXIT = object()
-
-    # when send raises StopIteration we're done
-    def send(coro, value, threw):
-        try:
-            if threw:
-                return coro.throw(type(value), value)
-            else:
-                return coro.send(value)
-        except StopIteration:
-            return EXIT
-
-    # kicking service calls (.send(None)) might be a way to start them without yielding? idk yet
+    Make sure to use fine grained errors.
+    Also, tracebacks are good! System should be developer friendly,
+    err on the side of more info even if it exposes system internals.
+    """
+    # We need to decide whether to .send or .throw depending on whether there was an
+    # error executing the service call. Sending exceptions via .throw allows programs
+    # to handle service call exceptions normally and potentially recover.
+    # On the first pass we send(None) to start the coroutine.
     service_call_result = None
-    # threw is annoying state management to decide whether to .send a value or to
-    # .throw an exception; both continue the coroutine and we need to treat the returns
-    # the same way.
-    threw = False
-    while (service_call := send(main, service_call_result, threw)) is not EXIT:
-        threw = False
-        # 1. get the right execution context
-        # TODO: verify that requested ec is a subset of permissions of ec
-        requested_ec = service_call.execution_context
-        # TODO: finer grained errors; tracebacks are good, system should be developer friendly
+    last_service_call_threw = False
+
+    while True:
+        # Execute the main program until it yields a ServiceCall object.
+        # When send or throw raise StopIteration, the program has exited.
         try:
-            # 2. find or set up the backend service
-            # TODO: currently just constructing a new backend instance every time
-            backend = ServiceMeta.SERVICES[service_call.service]()
-            endpoint = getattr(backend, service_call.endpoint)
-            # 3. schedule and await on the service call
-            # 4. save result to service_call_result
-            with requested_ec.active():
-                # args has a reference to the client instance
-                service_call_result = await endpoint(
-                    *service_call.args, **service_call.kwargs
+            if last_service_call_threw:
+                service_call = main.throw(
+                    type(service_call_result), service_call_result
                 )
+            else:
+                service_call = main.send(service_call_result)
+        except StopIteration:
+            return
+        last_service_call_threw = False
+
+        # The program made a service call.
+        try:
+            service_call_result = await handle_service_call(service_call)
         except Exception as e:
-            # Instead of `send`, the next loop needs to use `throw`.
             service_call_result = e
-            threw = True
+            last_service_call_threw = True

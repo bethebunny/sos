@@ -6,7 +6,8 @@ from pathlib import Path
 from execution_context import current_execution_context, User
 from kernel_main import kernel_main
 
-from file_service import Files
+from file_service import Files, PickleFilesystem
+from service import ServiceService
 
 # This should be standard and adapted for services also :)
 @dataclasses.dataclass
@@ -40,6 +41,9 @@ class Shell:
 
     # Should programs _also_ be services? Probably not?
     async def main(self):
+        await ServiceService().register_backend(
+            Files, PickleFilesystem, PickleFilesystem.Args(local_path=".sos-hard-drive")
+        )
         while (line := input(self.prompt)) != "exit":
             # probably use the shell tools here :)
             args = line.strip().split()
@@ -60,6 +64,17 @@ class Shell:
                 for filepath, metadata in sorted(files):
                     # TODO: maybe use rich or something? :)
                     print(f"{filepath} -> {metadata.filetype}")
+            if args[0:2] == ["list", "services"]:
+                with self.ec.active():
+                    print(await ServiceService().list_services())
+            if args[0:2] == ["list", "backends"]:
+                with self.ec.active():
+                    services = await ServiceService().list_services()
+                    for service in services:
+                        if service.__name__ == args[2]:
+                            print(
+                                service, await ServiceService().list_backends(service)
+                            )
 
 
 if __name__ == "__main__":

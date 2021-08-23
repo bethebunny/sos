@@ -1,6 +1,9 @@
+import collections
 import dataclasses
 import functools
 import inspect
+import random
+import re
 import typing
 from typing import Awaitable, Callable, Generic, Optional
 
@@ -206,8 +209,12 @@ class ServiceCall:
 
     # Desired execution context for the system call to run in
     execution_context: ExecutionContext
-    # The name (id) of the service to call; the kernel is responsible for mapping this
+    # The type of the service to call; the kernel is responsible for mapping this
     service: type["Service"]
+    # If there are multiple implementations of the service running and available to
+    # the user, then IDs can differentiate them. If you don't care which one you get,
+    # you don't have to specify.
+    service_id: Optional[str]
     # The name of the endpoint method to call on the service
     endpoint: str
     # args and kwargs for the endpoint method
@@ -235,7 +242,7 @@ class ServiceCall:
         return (yield self)
 
 
-async def execute_service_call(service, endpoint_handle, args, kwargs):
+async def execute_service_call(service, service_id, endpoint_handle, args, kwargs):
     """Do arg resolution, build and yield ServiceCall based on current execution context."""
     # We want to be very specific about when we grab the execution context
     # this isn't a security issue from a sytem standpoint since the kernel will
@@ -248,9 +255,13 @@ async def execute_service_call(service, endpoint_handle, args, kwargs):
     # be able to leak a context where we changed EC, so we can grab current EC after.
     args, kwargs = await resolve_args(args, kwargs)
 
-    # remove args[0] which is client.self
     return await ServiceCall(
-        current_execution_context(), service, endpoint_handle.__name__, args[1:], kwargs
+        current_execution_context(),
+        service,
+        service_id,
+        endpoint_handle.__name__,
+        args,
+        kwargs,
     )
 
 
@@ -268,15 +279,17 @@ def wrap_service_call(
     )
 
     @functools.wraps(endpoint_handle)
-    def wrapper(*args, **kwargs) -> ServiceResult[return_type]:
-        handle = execute_service_call(service, endpoint_handle, args, kwargs)
+    def wrapper(self, *args, **kwargs) -> ServiceResult[return_type]:
+        handle = execute_service_call(
+            service, self.service_id, endpoint_handle, args, kwargs
+        )
         return ServiceResult[return_type](handle)
 
     return wrapper
 
 
 class ServiceMeta(type):
-    SERVICES = {}
+    SERVICES = []
 
     def __new__(cls, name, bases, namespace):
         print(f"ServiceMeta: Creating service {name}")
@@ -291,14 +304,12 @@ class ServiceMeta(type):
         # TODO: need to think more carefully about what bases should be here.
         #       It definitely shouldn't have Service, but maybe should have
         #       eg. Service.Backend or something?
-        backend_base = ServiceBackendMeta(
-            f"{name}.Backend",
-            (ServiceBackendBase,),
-            {"__abstract__": True, **namespace},
-        )
+        backend_base = type(f"{name}.Backend", (ServiceBackendBase,), namespace)
 
         backend_base.interface = client_type
         client_type.Backend = backend_base
+
+        cls.SERVICES.append(client_type)
 
         return client_type
 
@@ -310,28 +321,6 @@ class ServiceBackendBase:
 
     def __init__(self, args: Optional[Args] = None):
         self.args = args or self.Args()
-
-
-class ServiceBackendMeta(type):
-    # Currently we only store the last one, and now we need to figure out how to manage them
-    SERVICE_IMPLEMENTATIONS = {}
-
-    def __new__(cls, name, bases, namespace):
-
-        if "interface" in namespace:
-            raise TypeError(
-                "Backend implementations must not shadow interface attribute"
-            )
-        # TODO: Might as well also validate some other things like it has Args and can
-        #       be constructed that way.
-
-        new_type = super().__new__(cls, name, bases, namespace)
-
-        # Backends may mark themselves __abstract__ to avoid registration
-        if not namespace.get("__abstract__"):
-            cls.SERVICE_IMPLEMENTATIONS[new_type.interface] = new_type
-
-        return new_type
 
 
 class Service(metaclass=ServiceMeta):
@@ -377,3 +366,103 @@ class Service(metaclass=ServiceMeta):
     with a guiding principle that practicality wins except in cases where we can make fundamentally more
     powerful tools through a stronger assumption that might make things less practical.
     """
+
+    def __init__(self, service_id: Optional[str] = None):
+        self.service_id = service_id
+
+
+def _load_words(path: str = "/usr/share/dict/words"):
+    valid_word_re = re.compile(r"^[a-z]{4,7}$")
+    with open(path) as words:
+        for word in map(lambda s: s.strip(), words):
+            if valid_word_re.match(word):
+                yield word
+
+
+_SEMANTIC_HASH_DICT = list(_load_words())
+
+
+def _random_word():
+    return random.choice(_SEMANTIC_HASH_DICT)
+
+
+def semantic_hash(len=2):
+    return "-".join(_random_word() for _ in range(len))
+
+
+class ServiceService(Service):
+    async def register_backend(
+        self,
+        service: type[Service],
+        backend: type[Service.Backend],
+        args: Service.Backend.Args,
+        service_id: Optional[str] = None,
+    ) -> str:
+        pass
+
+    async def list_services(self) -> list[Service]:
+        pass
+
+    async def list_backends(
+        self, service: type[Service]
+    ) -> list[(str, type[Service.Backend])]:
+        pass
+
+
+# @highlander
+# It probably makes sense to be able to replace this too :)
+# BUT NOT FOR NOW!
+class TheServiceServiceBackend(ServiceService.Backend):
+    def __init__(self):
+        # self._registered: dict[dict[str, Service.Backend]] = collections.defaultdict(dict)
+        # for now there's no difference between "registered" and "running"
+        self._running: dict[
+            type[Service], dict[str, Service.Backend]
+        ] = collections.defaultdict(dict)
+        self._running[ServiceService]["highlander"] = self
+
+    async def register_backend(
+        self,
+        service: type[Service],
+        backend: type[Service.Backend],
+        args: Service.Backend.Args,
+        service_id: Optional[str] = None,
+    ) -> str:
+        if service_id is None:
+            service_id = semantic_hash(2)
+        impls = self._running[service]
+        # TODO
+        # if service_id in impls:
+        #    raise
+        impls[service_id] = backend(args)
+        return service_id
+
+    async def list_services(self) -> list[Service]:
+        return list(ServiceMeta.SERVICES)
+
+    async def list_backends(
+        self, service: type[Service]
+    ) -> list[(str, type[Service.Backend])]:
+        return [
+            (service_id, type(backend))
+            for service_id, backend in self._running.get(service, {}).items()
+        ]
+
+    # TODO: this needs to be privileged, this should only be executed by the kernel
+    #       ... crazy idea, maybe there's a different service interface for it for
+    #       users? or ACTUALLY since I'm not using the client in the kernel I can just
+    #       not add it to the interface!!! genius
+    #       however, the TODO here is now that the kernel doesn't validate system calls,
+    #       so I can leak backends by constructing and yielding a SystemCall that runs
+    #       a method that's not on the interface xD
+    async def get_backend(
+        self, service: type[Service], service_id: Optional[str] = None
+    ) -> Service.Backend:
+        impls = self._running.get(service, {})
+        if service_id is not None:
+            return impls[service_id]
+        else:
+            if not impls:
+                # TODO error types
+                raise RuntimeError(f"no running service found for {service}")
+            return next(iter(impls.values()))

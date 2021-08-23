@@ -1,5 +1,6 @@
 import dataclasses
 from pathlib import Path
+import pickle
 import time
 import typing
 
@@ -189,6 +190,31 @@ class InMemoryFilesystem(FilesBackendBase):
     @property
     def _data(self) -> dict[Path, FileRecord]:
         return self._shared_data
+
+
+class PickleFilesystem(FilesBackendBase):
+    @dataclasses.dataclass
+    class Args:
+        local_path: str
+
+    def __init__(self, args: Args):
+        super().__init__(args)
+        try:
+            with open(args.local_path, "rb") as data_file:
+                self._shared_data = pickle.load(data_file)
+        except Exception as e:
+            print(f"Failed to load pickle file {args.local_path}: {e}")
+            print(f"Resetting data")
+            self._shared_data = {}
+
+    @property
+    def _data(self) -> dict[Path, FileRecord]:
+        return self._shared_data
+
+    async def write(self, path: Path, file: File) -> None:
+        await super().write(path, file)
+        with open(self.args.local_path, "wb") as data_file:
+            pickle.dump(self._shared_data)
 
 
 class Window:

@@ -1,6 +1,9 @@
+import asyncio
 from execution_context import current_execution_context
 import functools
+import inspect
 from pathlib import Path
+from service import ServiceService
 from file_service import File, Files, InMemoryFilesystem
 from kernel_main import kernel_main
 
@@ -8,20 +11,16 @@ import pytest
 
 
 @pytest.fixture
-def files():
-    InMemoryFilesystem._shared_data = {}
-    return Files()
+async def files():
+    await ServiceService().register_backend(
+        Files,
+        InMemoryFilesystem,
+        InMemoryFilesystem.Args(),
+    )
+    yield Files()
 
 
-def async_kernel_test(test_fn):
-    @functools.wraps(test_fn)
-    async def wrapped(*args, **kwargs):
-        return await kernel_main(test_fn(*args, **kwargs))
-
-    return pytest.mark.asyncio(wrapped)
-
-
-@async_kernel_test
+@pytest.mark.kernel
 async def test_service_simple(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -37,7 +36,7 @@ async def test_service_simple(files):
     assert result == "we did it!"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_getattr_lazy_service_results(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -53,7 +52,7 @@ async def test_getattr_lazy_service_results(files):
     assert result == "we did it!"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_apply_lazy_service_results(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
@@ -72,7 +71,7 @@ async def test_apply_lazy_service_results(files):
     assert result == "we did it!"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_apply_with_service_call(files):
     from functools import partial
 
@@ -90,13 +89,12 @@ async def test_apply_with_service_call(files):
     assert result == "we did it!"
 
 
-@async_kernel_test
-async def test_shared_file_backend():
+@pytest.mark.kernel
+async def test_shared_file_backend(files):
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
 
-    InMemoryFilesystem._shared_data = {}
-
+    # not using the files handle, creating a new one each time
     await Files().write(pointer_path, File[Path](path))
     pointer_contents = await Files().read(pointer_path).value
     assert pointer_contents == path
@@ -108,7 +106,7 @@ async def test_shared_file_backend():
     assert result == "we did it!"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_directory(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     with current_execution_context().full().active():
@@ -117,7 +115,7 @@ async def test_execution_context_change_directory(files):
             assert (await files.read(Path("/a/b/c"))).value == "stuff"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_directory_relative_access(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     with current_execution_context().full().active():
@@ -125,7 +123,7 @@ async def test_execution_context_change_directory_relative_access(files):
             assert (await files.read(Path("../c"))).value == "stuff"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_directory_sandbox(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     with files.change_directory(Path("/a")):
@@ -135,7 +133,7 @@ async def test_execution_context_change_directory_sandbox(files):
             await files.read(Path("/a/b/c"))
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_root(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
     assert (await files.read(Path("/a/b/c"))).value == "stuff"
@@ -143,7 +141,7 @@ async def test_execution_context_change_root(files):
         assert (await files.read(Path("/c"))).value == "stuff"
 
 
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_root_hides_original_root(files):
     await files.write(Path("/a/secret"), File[str]("stuff"))
     assert (await files.read(Path("/a/secret"))).value == "stuff"
@@ -152,8 +150,7 @@ async def test_execution_context_change_root_hides_original_root(files):
             await files.read(Path("/a/secret"))
 
 
-@pytest.mark.asyncio
-@async_kernel_test
+@pytest.mark.kernel
 async def test_execution_context_change_root_stops_relative_access(files):
     await files.write(Path("/a/secret"), File[str]("stuff"))
     assert (await files.read(Path("/a/secret"))).value == "stuff"

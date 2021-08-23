@@ -1,7 +1,7 @@
 from typing import Coroutine
 
 from execution_context import ExecutionContext, current_execution_context
-from service import Service, ServiceCall, ServiceBackendMeta
+from service import ServiceCall, ServiceService, TheServiceServiceBackend
 
 
 # TODO: Errors should be nice, eg. "did you mean...?"
@@ -38,19 +38,9 @@ def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionCont
         )
 
 
-async def lookup_service_backend(service: str) -> Service:
-    """Look up the requesteb backend service. If it's not already running, start it."""
-    if service not in ServiceBackendMeta.SERVICE_IMPLEMENTATIONS:
-        raise ServiceNotFound(service)
-    backend_class = ServiceBackendMeta.SERVICE_IMPLEMENTATIONS[service]
-    try:
-        # TODO: currently just constructing a new backend instance every time
-        return backend_class()
-    except Exception as e:
-        raise ServiceDidNotStart(service) from e
-
-
-async def handle_service_call(service_call: ServiceCall) -> any:
+async def handle_service_call(
+    services: ServiceService.Backend, service_call: ServiceCall
+) -> any:
     """
     1. validate and set the execution context
     2. find and/or set up the backend service
@@ -59,7 +49,7 @@ async def handle_service_call(service_call: ServiceCall) -> any:
     """
     requested_ec = service_call.execution_context
     validate_execution_context(current_execution_context(), requested_ec)
-    backend = await lookup_service_backend(service_call.service)
+    backend = await services.get_backend(service_call.service, service_call.service_id)
     if not hasattr(backend, service_call.endpoint):
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
     endpoint = getattr(backend, service_call.endpoint)
@@ -85,6 +75,8 @@ async def kernel_main(main: Coroutine):
     service_call_result = None
     last_service_call_threw = False
 
+    services = TheServiceServiceBackend()
+
     while True:
         # Execute the main program until it yields a ServiceCall object.
         # When send or throw raise StopIteration, the program has exited.
@@ -104,7 +96,7 @@ async def kernel_main(main: Coroutine):
 
         # The program made a service call.
         try:
-            service_call_result = await handle_service_call(service_call)
+            service_call_result = await handle_service_call(services, service_call)
         except Exception as e:
             service_call_result = e
             last_service_call_threw = True

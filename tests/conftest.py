@@ -78,8 +78,12 @@ def wrap_kernel_test(func):
                 for finalizer in async_gen_finalizers.values():
                     try:
                         await finalizer
-                    except:
-                        pass
+                    except StopAsyncIteration:
+                        pass  # expected
+                    except Exception as e:
+                        raise
+                    else:
+                        raise TypeError("async gen fixture {func} had multiple yields")
 
         coro = kernel_main(run_fixtures_and_test())
         task = asyncio.ensure_future(coro, loop=loop)

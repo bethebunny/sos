@@ -17,8 +17,13 @@ ROOT = User("root")
 # Obviously this implementation doesn't do that yet.
 #
 # For the intended api is eg.
-# with current_execution_context().replace(user=User("stef"), root="/home/stef"):
+# with current_execution_context().replace(root="/home/stef").active():
 #     files = Files()
+#
+# There's soooo many ergonomic TODO here
+#  - let ExecutionContext be used as a context manager
+#  - don't have to use dataclasses.replace everywhere
+#  - current_execution_context() is really wordy and we use it everywhere
 @dataclasses.dataclass(frozen=True)
 class ExecutionContext:
     user: User
@@ -27,21 +32,19 @@ class ExecutionContext:
     # if sandbox, then by default activating will chroot
     sandbox: bool = True
 
-    def full(self) -> "ExecutionContext":
-        """An execution context which won't sandbox."""
-        return dataclasses.replace(self, sandbox=False)
+    @property
+    def full_path(self):
+        return self.root / self.working_directory.relative_to("/")
 
-    def chroot(self, new_root: Optional[Path] = None) -> "ExecutionContext":
-        # change root to new_root or working_directory
-        if new_root is None:
-            new_root = self.working_directory
-        if new_root.is_absolute():
-            new_root = new_root.relative_to("/")
-        return dataclasses.replace(
-            self,
-            root=self.root.joinpath(new_root),
-            working_directory=Path("/"),
-        )
+    def replace(self, **kwargs):
+        return dataclasses.replace(self, **kwargs)
+
+    def nosandbox(self) -> "ExecutionContext":
+        """An execution context which won't sandbox."""
+        return self.replace(sandbox=False)
+
+    def chroot(self) -> "ExecutionContext":
+        return self.replace(root=self.full_path, working_directory=Path("/"))
 
     @contextlib.contextmanager
     def active(self):

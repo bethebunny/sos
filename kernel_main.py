@@ -39,7 +39,7 @@ def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionCont
 
 
 async def handle_service_call(
-    services: ServiceService.Backend, service_call: ServiceCall
+    ec: ExecutionContext, services: ServiceService.Backend, service_call: ServiceCall
 ) -> any:
     """
     1. validate and set the execution context
@@ -48,7 +48,7 @@ async def handle_service_call(
     4. save result to service_call_result
     """
     requested_ec = service_call.execution_context
-    validate_execution_context(current_execution_context(), requested_ec)
+    validate_execution_context(ec, requested_ec)
     # we guarantee that the ServiceService will not make system calls
     backend = await services.get_backend(service_call.service, service_call.service_id)
     if not hasattr(backend, service_call.endpoint):
@@ -56,13 +56,14 @@ async def handle_service_call(
     endpoint = getattr(backend, service_call.endpoint)
     with requested_ec.active():
         return await kernel_execute_coroutine(
+            requested_ec,
             services,
             endpoint(*service_call.args, **service_call.kwargs),
         )
 
 
 async def kernel_execute_coroutine(
-    services: ServiceService.Backend, coro: Coroutine
+    ec: ExecutionContext, services: ServiceService.Backend, coro: Coroutine
 ) -> any:
     """Orchestrates a program (main), allowing it to yield ServiceCall objects,
     which are then executed and the results sent back to the coroutine.
@@ -99,7 +100,7 @@ async def kernel_execute_coroutine(
 
         # The program made a service call.
         try:
-            service_call_result = await handle_service_call(services, service_call)
+            service_call_result = await handle_service_call(ec, services, service_call)
         except Exception as e:
             service_call_result = e
             last_service_call_threw = True
@@ -107,4 +108,5 @@ async def kernel_execute_coroutine(
 
 async def kernel_main(main: Coroutine):
     services = TheServiceServiceBackend()
-    await kernel_execute_coroutine(services, main)
+    execution_context = current_execution_context()
+    await kernel_execute_coroutine(execution_context, services, main)

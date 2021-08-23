@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 from pathlib import Path
 import pickle
@@ -92,9 +93,12 @@ class Files(Service):
             working_directory=resolve_path(current_execution_context(), path),
         ).active()
 
+    @contextlib.contextmanager
     def change_root(self, path: Path):
         # Hmm this won't set the execution context for self anyway :/
-        return current_execution_context().chroot(path).active()
+        with self.change_directory(path):
+            with current_execution_context().chroot().active():
+                yield
 
 
 def resolve_path(ec: ExecutionContext, path: Path) -> Path:
@@ -103,10 +107,9 @@ def resolve_path(ec: ExecutionContext, path: Path) -> Path:
     # a path name running in a sandbox, I want the user to _know_ that
     # it's a relative path to the working directory.
     if path.is_absolute():
-        abspath = ec.root.joinpath(path.relative_to("/"))
+        abspath = ec.root / path.relative_to("/")
     else:
-        print(ec)
-        abspath = ec.root.joinpath(ec.working_directory.relative_to("/")).joinpath(path)
+        abspath = ec.full_path / path
     abspath = abspath.resolve()
     if not abspath.is_relative_to(ec.root):
         raise ValueError(f"path {path} referenced above root")
@@ -217,14 +220,48 @@ class PickleFilesystem(FilesBackendBase):
             pickle.dump(self._shared_data)
 
 
-class Window:
-    @property
-    def width(self) -> int:
-        pass
+# TODO: save file metadata map somewhere so everything's not a RawBinaryFile
+class ProxyFilesystem(Files.Backend):
+    @dataclasses.dataclass
+    class Args:
+        local_root: Path
 
-    @property
-    def height(self) -> int:
-        pass
+    def __init__(self, args: Args):
+        super().__init__(args)
+        if not args.local_root.exists():
+            args.local_root.mkdir()
 
-    async def draw(self, framebuffer: bytes):
-        pass
+    def resolve_real_path(self, path: Path) -> Path:
+        return self.args.local_root / path.relative_to("/")
+
+    async def stat(self, path: Path) -> FileMetadata:
+        path = resolve_path(current_execution_context(), path)
+        stat = self.resolve_real_path(path).stat()
+        return self._os_stat_to_file_metadata(stat)
+
+    def _os_stat_to_file_metadata(self, stat):
+        return FileMetadata(bytes, stat.st_size, stat.st_ctime, stat.st_mtime)
+
+    async def read(self, path: Path) -> File:
+        path = resolve_path(current_execution_context(), path)
+        real = self.resolve_real_path(path)
+        return RawBinaryFile(real.read_bytes())
+
+    async def write(self, path: Path, file: File) -> None:
+        raise NotImplemented
+
+    async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
+        # Hmm something's not good. I really don't like having to think this carefully
+        # about joining paths together. Also `cd tests; ls ..` printing the contents
+        # of `tests` is really unintuitive. Maybe `Files` should be allow-listed to
+        # not sandbox by default?
+        ec = current_execution_context()
+        abspath = resolve_path(ec, path)
+
+        # TODO: we'd like to be able to implement service calls as generators
+        #       but they don't have the same coroutine semantics eg. .send so the kernel
+        #       needs to orchestrate them differently.
+        return [
+            (subpath.name, self._os_stat_to_file_metadata(subpath.stat()))
+            for subpath in self.resolve_real_path(abspath).iterdir()
+        ]

@@ -405,7 +405,7 @@ class ServiceService(Service):
 
     async def list_backends(
         self, service: type[Service]
-    ) -> list[(str, type[Service.Backend])]:
+    ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
         pass
 
 
@@ -414,6 +414,7 @@ class ServiceService(Service):
 # BUT NOT FOR NOW!
 class TheServiceServiceBackend(ServiceService.Backend):
     def __init__(self):
+        super().__init__()
         # self._registered: dict[dict[str, Service.Backend]] = collections.defaultdict(dict)
         # for now there's no difference between "registered" and "running"
         self._running: dict[
@@ -443,9 +444,9 @@ class TheServiceServiceBackend(ServiceService.Backend):
 
     async def list_backends(
         self, service: type[Service]
-    ) -> list[(str, type[Service.Backend])]:
+    ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
         return [
-            (service_id, type(backend))
+            (service_id, type(backend), backend.args)
             for service_id, backend in self._running.get(service, {}).items()
         ]
 

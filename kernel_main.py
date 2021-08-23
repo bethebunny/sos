@@ -43,22 +43,27 @@ async def handle_service_call(
 ) -> any:
     """
     1. validate and set the execution context
-    2. find and/or set up the backend service
+    2. find the backend service
     3. schedule and await on the service call
     4. save result to service_call_result
     """
     requested_ec = service_call.execution_context
     validate_execution_context(current_execution_context(), requested_ec)
+    # we guarantee that the ServiceService will not make system calls
     backend = await services.get_backend(service_call.service, service_call.service_id)
     if not hasattr(backend, service_call.endpoint):
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
     endpoint = getattr(backend, service_call.endpoint)
-    # what if the endpoint itself is making service calls? I think that's next up :P
     with requested_ec.active():
-        return await endpoint(*service_call.args, **service_call.kwargs)
+        return await kernel_execute_coroutine(
+            services,
+            endpoint(*service_call.args, **service_call.kwargs),
+        )
 
 
-async def kernel_main(main: Coroutine):
+async def kernel_execute_coroutine(
+    services: ServiceService.Backend, coro: Coroutine
+) -> any:
     """Orchestrates a program (main), allowing it to yield ServiceCall objects,
     which are then executed and the results sent back to the coroutine.
     Also manages execution context including validation and security checks,
@@ -75,23 +80,21 @@ async def kernel_main(main: Coroutine):
     service_call_result = None
     last_service_call_threw = False
 
-    services = TheServiceServiceBackend()
-
     while True:
         # Execute the main program until it yields a ServiceCall object.
         # When send or throw raise StopIteration, the program has exited.
         try:
             if last_service_call_threw:
                 # Right now throwing doesn't actually show the service traceback
-                service_call = main.throw(
+                service_call = coro.throw(
                     type(service_call_result),
                     service_call_result.args,
                     service_call_result.__traceback__,
                 )
             else:
-                service_call = main.send(service_call_result)
-        except StopIteration:
-            return
+                service_call = coro.send(service_call_result)
+        except StopIteration as e:
+            return e.value
         last_service_call_threw = False
 
         # The program made a service call.
@@ -100,3 +103,8 @@ async def kernel_main(main: Coroutine):
         except Exception as e:
             service_call_result = e
             last_service_call_threw = True
+
+
+async def kernel_main(main: Coroutine):
+    services = TheServiceServiceBackend()
+    await kernel_execute_coroutine(services, main)

@@ -395,7 +395,7 @@ class ServiceService(Service):
         self,
         service: type[Service],
         backend: type[Service.Backend],
-        args: Service.Backend.Args,
+        args: Optional[Service.Backend.Args] = None,
         service_id: Optional[str] = None,
     ) -> str:
         pass
@@ -425,11 +425,12 @@ class TheServiceServiceBackend(ServiceService.Backend):
         self,
         service: type[Service],
         backend: type[Service.Backend],
-        args: Service.Backend.Args,
+        args: Optional[Service.Backend.Args] = None,
         service_id: Optional[str] = None,
     ) -> str:
-        if service_id is None:
-            service_id = semantic_hash(2)
+        service_id = service_id if service_id is not None else semantic_hash(2)
+        args = args if args is not None else backend.Args()
+
         impls = self._running[service]
         # TODO
         # if service_id in impls:

@@ -1,7 +1,7 @@
 from typing import Coroutine
 
 from execution_context import ExecutionContext, current_execution_context
-from service import Service, ServiceCall, ServiceMeta
+from service import Service, ServiceCall, ServiceBackendMeta
 
 
 # TODO: Errors should be nice, eg. "did you mean...?"
@@ -40,9 +40,9 @@ def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionCont
 
 async def lookup_service_backend(service: str) -> Service:
     """Look up the requesteb backend service. If it's not already running, start it."""
-    if service not in ServiceMeta.SERVICES:
+    if service not in ServiceBackendMeta.SERVICE_IMPLEMENTATIONS:
         raise ServiceNotFound(service)
-    backend_class = ServiceMeta.SERVICES[service]
+    backend_class = ServiceBackendMeta.SERVICE_IMPLEMENTATIONS[service]
     try:
         # TODO: currently just constructing a new backend instance every time
         return backend_class()

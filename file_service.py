@@ -82,23 +82,34 @@ class Files(Service):
         """Only applies to files of type SequentialFile."""
         pass
 
+    async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
+        pass
 
-# I think the next thing I'd like to do is to stub out a real "Filesystem"
-# service that actually works, and then make a simple shell that can interact
-# with it and try do some basic things. In doing that I want to think at least
-# a little bit about what the contract for service state is; my stub should keep
-# a map somewhere in memory and maybe even saved as json, but who owns that memory?
-class Files1(Files):
-    async def stat(self, path: Path) -> FileMetadata:
-        return FileMetadata(
-            bytes,
-            50,
-            time.time() - 100,
-            time.time() - 50,
-        )
+    def change_directory(self, path: Path):
+        return dataclasses.replace(
+            current_execution_context(),
+            working_directory=resolve_path(current_execution_context(), path),
+        ).active()
 
-    async def read(self, path: Path) -> File:
-        return self.stat(path).size
+    def change_root(self, path: Path):
+        # Hmm this won't set the execution context for self anyway :/
+        return current_execution_context().chroot(path).active()
+
+
+def resolve_path(ec: ExecutionContext, path: Path) -> Path:
+    # Hmm awkward. If you are switching chroots all of the time,
+    # then paths are weird to keep track of. For instance if I output
+    # a path name running in a sandbox, I want the user to _know_ that
+    # it's a relative path to the working directory.
+    if path.is_absolute():
+        abspath = ec.root.joinpath(path.relative_to("/"))
+    else:
+        print(ec)
+        abspath = ec.root.joinpath(ec.working_directory.relative_to("/")).joinpath(path)
+    abspath = abspath.resolve()
+    if not abspath.is_relative_to(ec.root):
+        raise ValueError(f"path {path} referenced above root")
+    return abspath
 
 
 @dataclasses.dataclass
@@ -107,7 +118,14 @@ class FileRecord:
     file: File
 
 
-class Files2(Files):
+# TODO: Interface versioning, and in general storing types and their versions in a stable
+#       way is going to be key. However, I'd rather get the system to a place where I can play
+#       with it and understand what "good" looks like before I try to figure out "perfect" :)
+#       So let's start with "definitely bad but easy".
+#         - no versioning at all
+#         - types stored with pickle
+class FilesBackendBase(Files.Backend):
+    __abstract__ = True
     # The Service definition class is both an interface/client and the implementation.
     # When you define a Service class, the metaclass creates the separate
     # implementations, and this becomes a thin client interface. When yielding
@@ -120,28 +138,13 @@ class Files2(Files):
     # So next I really need to figure out how Services get configured, so eg.
     # I can have an instance of this in the unit tests that doesn't just overwrite
     # files created by the shell xDDD
-    _data: dict[Path, FileRecord] = {}
 
-    @staticmethod
-    def resolve_path(ec: ExecutionContext, path: Path) -> Path:
-        # Hmm awkward. If you are switching chroots all of the time,
-        # then paths are weird to keep track of. For instance if I output
-        # a path name running in a sandbox, I want the user to _know_ that
-        # it's a relative path to the working directory.
-        if path.is_absolute():
-            abspath = ec.root.joinpath(path.relative_to("/"))
-        else:
-            print(ec)
-            abspath = ec.root.joinpath(ec.working_directory.relative_to("/")).joinpath(
-                path
-            )
-        abspath = abspath.resolve()
-        if not abspath.is_relative_to(ec.root):
-            raise ValueError(f"path {path} referenced above root")
-        return abspath
+    @property
+    def _data(self) -> dict[Path, FileRecord]:
+        raise NotImplemented
 
     async def stat(self, path: Path) -> FileMetadata:
-        path = self.resolve_path(current_execution_context(), path)
+        path = resolve_path(current_execution_context(), path)
         return self._data[path].metadata
 
     # I'm pretty sure if we're going through the trouble of having structured
@@ -150,11 +153,11 @@ class Files2(Files):
     # and almost certainly whatever "read" is should return an object which is
     # more aware of the file metadata rather than just a byte stream.
     async def read(self, path: Path) -> File:
-        path = self.resolve_path(current_execution_context(), path)
+        path = resolve_path(current_execution_context(), path)
         return self._data[path].file
 
     async def write(self, path: Path, file: File) -> None:
-        path = self.resolve_path(current_execution_context(), path)
+        path = resolve_path(current_execution_context(), path)
         data = self._data
         record = FileRecord(
             metadata=FileMetadata(
@@ -172,22 +175,20 @@ class Files2(Files):
         data[path] = record
 
     async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
-        path = self.resolve_path(current_execution_context(), path)
+        path = resolve_path(current_execution_context(), path)
         return [
             (filepath, record.metadata)
             for filepath, record in self._data
             if path == filepath.parent
         ]
 
-    def change_directory(self, path: Path):
-        return dataclasses.replace(
-            current_execution_context(),
-            working_directory=self.resolve_path(current_execution_context(), path),
-        ).active()
 
-    def change_root(self, path: Path):
-        # Hmm this won't set the execution context for self anyway :/
-        return current_execution_context().chroot(path).active()
+class InMemoryFilesystem(FilesBackendBase):
+    _shared_data: dict[Path, FileRecord] = {}
+
+    @property
+    def _data(self) -> dict[Path, FileRecord]:
+        return self._shared_data
 
 
 class Window:

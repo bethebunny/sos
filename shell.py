@@ -6,7 +6,7 @@ from pathlib import Path
 from execution_context import current_execution_context, User
 from kernel_main import kernel_main
 
-from file_service import Files2
+from file_service import Files
 
 # This should be standard and adapted for services also :)
 @dataclasses.dataclass
@@ -56,13 +56,14 @@ class Shell:
                     print(f"Invalid # of LS args")
                     continue
                 with self.ec.active():
-                    files = await Files2().list_directory(self.resolve_path(ls_args[0]))
+                    files = await Files().list_directory(self.resolve_path(ls_args[0]))
                 for filepath, metadata in sorted(files):
                     # TODO: maybe use rich or something? :)
                     print(f"{filepath} -> {metadata.filetype}")
 
 
-import asyncio
+if __name__ == "__main__":
+    import asyncio
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(kernel_main(Shell(Args(User("stef"))).main()))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(kernel_main(Shell(Args(User("stef"))).main()))

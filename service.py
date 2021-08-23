@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import inspect
 import typing
-from typing import Awaitable, Callable, Generic
+from typing import Awaitable, Callable, Generic, Optional
 
 T = typing.TypeVar("T")
 
@@ -207,7 +207,7 @@ class ServiceCall:
     # Desired execution context for the system call to run in
     execution_context: ExecutionContext
     # The name (id) of the service to call; the kernel is responsible for mapping this
-    service: str
+    service: type["Service"]
     # The name of the endpoint method to call on the service
     endpoint: str
     # args and kwargs for the endpoint method
@@ -255,7 +255,7 @@ async def execute_service_call(service, endpoint_handle, args, kwargs):
 
 
 def wrap_service_call(
-    service: str,
+    service: type["Service"],
     endpoint_handle: Callable[..., Awaitable[T]],
 ) -> Callable[..., ServiceResult[T]]:
     """Replaces an async method on a service interface with one which actually executes
@@ -278,21 +278,60 @@ def wrap_service_call(
 class ServiceMeta(type):
     SERVICES = {}
 
-    def __new__(cls, name, bases, dict):
-        print(name)
-        # Register a backend service which just executes the service code as-is
-        cls.SERVICES[name] = super().__new__(cls, name, bases, dict)
+    def __new__(cls, name, bases, namespace):
+        print(f"ServiceMeta: Creating service {name}")
 
-        # Return a client
-        return super().__new__(
-            cls,
-            name,
-            bases,
-            {
-                k: wrap_service_call(name, v) if inspect.iscoroutinefunction(v) else v
-                for k, v in dict.items()
-            },
+        client_type = super().__new__(cls, name, bases, namespace)
+
+        # vars().update is gone in python3 / mappingproxy
+        for attr, value in namespace.items():
+            if inspect.iscoroutinefunction(value):
+                setattr(client_type, attr, wrap_service_call(client_type, value))
+
+        # TODO: need to think more carefully about what bases should be here.
+        #       It definitely shouldn't have Service, but maybe should have
+        #       eg. Service.Backend or something?
+        backend_base = ServiceBackendMeta(
+            f"{name}.Backend",
+            (ServiceBackendBase,),
+            {"__abstract__": True, **namespace},
         )
+
+        backend_base.interface = client_type
+        client_type.Backend = backend_base
+
+        return client_type
+
+
+class ServiceBackendBase:
+    @dataclasses.dataclass
+    class Args:
+        pass
+
+    def __init__(self, args: Optional[Args] = None):
+        self.args = args or self.Args()
+
+
+class ServiceBackendMeta(type):
+    # Currently we only store the last one, and now we need to figure out how to manage them
+    SERVICE_IMPLEMENTATIONS = {}
+
+    def __new__(cls, name, bases, namespace):
+
+        if "interface" in namespace:
+            raise TypeError(
+                "Backend implementations must not shadow interface attribute"
+            )
+        # TODO: Might as well also validate some other things like it has Args and can
+        #       be constructed that way.
+
+        new_type = super().__new__(cls, name, bases, namespace)
+
+        # Backends may mark themselves __abstract__ to avoid registration
+        if not namespace.get("__abstract__"):
+            cls.SERVICE_IMPLEMENTATIONS[new_type.interface] = new_type
+
+        return new_type
 
 
 class Service(metaclass=ServiceMeta):

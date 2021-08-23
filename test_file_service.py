@@ -1,7 +1,7 @@
 from execution_context import current_execution_context
 import functools
 from pathlib import Path
-from file_service import File, Files2
+from file_service import File, Files, InMemoryFilesystem
 from kernel_main import kernel_main
 
 import pytest
@@ -9,8 +9,8 @@ import pytest
 
 @pytest.fixture
 def files():
-    Files2._backend = None
-    return Files2()
+    InMemoryFilesystem._shared_data = {}
+    return Files()
 
 
 def async_kernel_test(test_fn):
@@ -95,17 +95,16 @@ async def test_shared_file_backend():
     pointer_path = Path("/path-to-write")
     path = Path("/a/b/c")
 
-    # clear out backend
-    Files2._backend = None
+    InMemoryFilesystem._shared_data = {}
 
-    await Files2().write(pointer_path, File[Path](path))
-    pointer_contents = await Files2().read(pointer_path).value
+    await Files().write(pointer_path, File[Path](path))
+    pointer_contents = await Files().read(pointer_path).value
     assert pointer_contents == path
 
     # don't do lazy eval; explicitly await on service call result
-    path_to_write = await Files2().read(pointer_path).value
-    await Files2().write(path_to_write, File[str]("we did it!"))
-    result = await Files2().read(path).value
+    path_to_write = await Files().read(pointer_path).value
+    await Files().write(path_to_write, File[str]("we did it!"))
+    result = await Files().read(path).value
     assert result == "we did it!"
 
 

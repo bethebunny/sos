@@ -1,6 +1,8 @@
+import asyncio
 import dataclasses
 import pytest
 
+from sos import service
 from sos.service import Service
 from sos.services import Services
 
@@ -18,7 +20,7 @@ class SimpleA(A.Backend):
         return x + 1
 
     async def triangle(self, x: int) -> int:
-        raise NotImplemented
+        return (x * (x + 1)) // 2
 
 
 class OutsourceA(A.Backend):
@@ -70,6 +72,24 @@ async def test_service_calls_can_recursively_make_service_calls():
     assert (await A().triangle(10)) == 55
 
 
-# TODO: test awaiting on multiple service calls at the same time with a `gather`
+@pytest.mark.kernel
+async def test_service_calls_can_be_awaited_simultaneously_with_gather(services):
+    # TODO: service_result.gather cheats right now :)
+    # This is actually closer to working than I thought o.o
+    # We _probably_ don't want to use asyncio.gather because it has a bunch
+    # of logic that care about event loops and Tasks and such. HOWEVER
+    # digging into it revealed more details about how the event loop works,
+    # and ServiceCall / ServiceResult actually share _a lot_ of concepts with
+    # asyncio.futures.Future. I should read that code more carefully; it's very
+    # possible that the right way to implement most of the "real" code eg.
+    # waiting on sockets, etc. is with Futures, since it looks like they _can_
+    # be yielded up to the event loop.
+    simple, outsourced = services
+    assert [5, 55] == await service.gather(
+        A(simple).inc(4),
+        A(outsourced).triangle(10),
+    )
+
+
 # TODO: test awaiting on a `ServiceResultApply` which is running a different service call
 #       which runs in a different ExecutionContext and validate that ECs apply properly.

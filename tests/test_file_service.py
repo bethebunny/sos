@@ -8,11 +8,7 @@ import pytest
 
 @pytest.fixture
 async def files():
-    await Services().register_backend(
-        Files,
-        InMemoryFilesystem,
-        InMemoryFilesystem.Args(),
-    )
+    await Services().register_backend(Files, InMemoryFilesystem)
     yield Files()
 
 

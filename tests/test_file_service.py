@@ -1,14 +1,14 @@
 from sos.execution_context import current_execution_context
 from pathlib import Path
-from sos.service import ServiceService
-from sos.file_service import File, Files, InMemoryFilesystem
+from sos.services import Services
+from sos.services.files import File, Files, InMemoryFilesystem
 
 import pytest
 
 
 @pytest.fixture
 async def files():
-    await ServiceService().register_backend(
+    await Services().register_backend(
         Files,
         InMemoryFilesystem,
         InMemoryFilesystem.Args(),

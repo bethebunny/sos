@@ -11,8 +11,8 @@ import readline
 from sos.execution_context import current_execution_context, User
 from sos.kernel_main import kernel_main
 
-from sos.file_service import Files, ProxyFilesystem
-from sos.service import ServiceService
+from sos.services import Services
+from sos.services.files import Files, ProxyFilesystem
 
 
 @dataclasses.dataclass
@@ -68,9 +68,8 @@ class Shell:
             working_directory=(self.ec.full_path / directory).resolve(),
         )
 
-    # Should programs _also_ be services? Probably not?
     async def main(self):
-        await ServiceService().register_backend(
+        await Services().register_backend(
             Files,
             ProxyFilesystem,
             ProxyFilesystem.Args(local_root=Path(".sos-hard-drive")),
@@ -81,7 +80,7 @@ class Shell:
             # probably use the shell tools here :)
             args = line.strip().split()
 
-            # some kind of map or service type
+            # and some smarter arg parsing / function registration here :)
             try:
                 if args[0] == "cd":
                     self.cd(Path(args[1]))
@@ -98,13 +97,13 @@ class Shell:
                         print(data.decode("utf8"))
                 if args[0:2] == ["list", "services"]:
                     with self.ec.active():
-                        print(tabular(await ServiceService().list_services()))
+                        print(tabular(await Services().list_services()))
                 if args[0:2] == ["list", "backends"]:
                     with self.ec.active():
-                        services = await ServiceService().list_services()
+                        services = await Services().list_services()
                         for service in services:
                             if service.__name__ == args[2]:
-                                backends = await ServiceService().list_backends(service)
+                                backends = await Services().list_backends(service)
                                 print(tabular(backends))
             except Exception as e:
                 Console().print_exception(show_locals=False)

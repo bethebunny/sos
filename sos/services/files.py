@@ -5,8 +5,8 @@ import pickle
 import time
 import typing
 
-from .execution_context import ExecutionContext, current_execution_context
-from .service import Service
+from sos.execution_context import ExecutionContext, current_execution_context
+from sos.service import Service
 
 
 T = typing.TypeVar("T")

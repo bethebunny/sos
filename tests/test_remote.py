@@ -1,5 +1,5 @@
-from sos.execution_context import current_execution_context
-from sos.service import Service, ServiceService
+from sos.service import Service
+from sos.services import Services
 from sos.service.remote import Remote
 
 import pytest
@@ -17,13 +17,21 @@ class SimpleImpl(Simple.Backend):
 
 @pytest.mark.kernel
 async def test_remote_simple():
-    service_id = await ServiceService().register_backend(
+    service_id = await Services().register_backend(
         Simple,
         Remote[Simple],
         Remote.Args("remote_id", remote_service_id=None),
     )
-    fake_remote_service_id = await ServiceService().register_backend(
-        Simple, SimpleImpl, None
-    )
-    print(service_id)
+    await Services().register_backend(Simple, SimpleImpl, None)
     assert (await Simple(service_id).inc(4)) == 5
+
+
+@pytest.mark.kernel
+async def test_remote_fails_with_no_available_remote():
+    service_id = await Services().register_backend(
+        Simple,
+        Remote[Simple],
+        Remote.Args("remote_id", remote_service_id=None),
+    )
+    with pytest.raises(RuntimeError):
+        await Simple(service_id).inc(4)

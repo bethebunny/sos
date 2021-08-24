@@ -2,8 +2,8 @@ import dataclasses
 import functools
 from typing import Optional, Type, TypeVar
 
-from . import Service, ServiceService
-from ..file_service import Files
+from . import Service
+from sos.services import Services
 
 S = TypeVar("S", bound=Service)
 
@@ -24,6 +24,8 @@ S = TypeVar("S", bound=Service)
 # specification. It's possible this is unique, ie. there's no other
 # Remote-type things we want to do, and all others are "normal"
 # backend-style decorators.
+# If we decide we want more things like this we can generalize, but
+# for now all the complexity is contained here.
 
 
 class Remote:
@@ -31,7 +33,7 @@ class Remote:
 
     For instance,
 
-    >>> await ServiceService().register_backend(Files, Remote[Files], Remote.Args(ip_address))
+    >>> await Services().register_backend(Files, Remote[Files], Remote.Args(ip_address))
     >>> await Files().list_directory()
 
     will let you use a `Files` service running at `ip_address`!
@@ -53,6 +55,11 @@ class Remote:
         remote_service_id: Optional[str] = None
 
     # TODO: probably making this use Generic smartly so I can reuse those tools
+    #       Generic uses __class_getitem__ and __init_subclass__ so that A() uses
+    #       A.__new__ only, whereas A[B]() is actually _GenericAlias.__call__, which
+    #       internally calls A.__new__ and afterwards sets up __orig_class__, etc.
+    #       That means with normal Generics we don't have access to __orig_class__
+    #       until __init__ time.
     _service_type: Type[Service]
 
     async def __call_remote(self, endpoint, args, kwargs) -> any:
@@ -62,7 +69,7 @@ class Remote:
             f"{', '.join(f'{k}={v!r}' for k, v in kwargs.items())})"
         )
         # TODO: make this actually do a remote call :)
-        services = await ServiceService().list_backends(self._service_type)
+        services = await Services().list_backends(self._service_type)
         for service_id, backend_type, _ in services:
             if not issubclass(backend_type, Remote):
                 endpoint = getattr(self._service_type(service_id), endpoint)
@@ -72,25 +79,31 @@ class Remote:
                 f"No local service backend found to pretend for {self._service_type}"
             )
 
-    # This should probably be cached.
+    _class_cache: dict[Type[Service] : Type["Remote"]] = {}
+
     @classmethod
     def __class_getitem__(cls, item):
         if not issubclass(item, Service):
             raise TypeError(f"Remote must take a Service type parameter; got {item}.")
+        if not (cached := cls._class_cache.get(item)):
+            cached = cls._class_cache[item] = cls.make_remote_backend(item)
+        return cached
 
+    @classmethod
+    def make_remote_backend(cls, service_type: Type[Service]):
         def make_endpoint(endpoint):
-            @functools.wraps(getattr(item, endpoint))
+            @functools.wraps(getattr(service_type, endpoint))
             async def remote_endpoint(self, *args, **kwargs):
                 return await self.__call_remote(endpoint, args, kwargs)
 
             return remote_endpoint
 
         endpoints = {
-            endpoint: make_endpoint(endpoint) for endpoint in item.__endpoints__
+            endpoint: make_endpoint(endpoint) for endpoint in service_type.__endpoints__
         }
 
         return type(
-            f"Remote[{item.__name__}].Backend",
-            (cls, item.Backend),
-            {"_service_type": item, **endpoints},
+            f"Remote[{service_type.__name__}].Backend",
+            (cls, service_type.Backend),
+            {"_service_type": service_type, **endpoints},
         )

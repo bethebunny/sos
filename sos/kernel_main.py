@@ -1,7 +1,9 @@
 from typing import Coroutine
 
 from .execution_context import ExecutionContext, current_execution_context
-from .service import ServiceCall, ServiceService, TheServiceServiceBackend
+from .service import ServiceCall
+from .services import Services
+from .services.services import TheServicesBackend
 
 
 # TODO: Errors should be nice, eg. "did you mean...?"
@@ -39,7 +41,7 @@ def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionCont
 
 
 async def handle_service_call(
-    ec: ExecutionContext, services: ServiceService.Backend, service_call: ServiceCall
+    ec: ExecutionContext, services: Services.Backend, service_call: ServiceCall
 ) -> any:
     """
     1. validate and set the execution context
@@ -49,7 +51,7 @@ async def handle_service_call(
     """
     requested_ec = service_call.execution_context
     validate_execution_context(ec, requested_ec)
-    # we guarantee that the ServiceService will not make system calls
+    # we guarantee that the Services will not make system calls
     backend = await services.get_backend(service_call.service, service_call.service_id)
     if not hasattr(backend, service_call.endpoint):
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
@@ -69,7 +71,7 @@ async def handle_service_call(
 #       on by which processes, and only move them back to `active` when their service
 #       calls return.
 async def kernel_execute_coroutine(
-    ec: ExecutionContext, services: ServiceService.Backend, coro: Coroutine
+    ec: ExecutionContext, services: Services.Backend, coro: Coroutine
 ) -> any:
     """Orchestrates a program (main), allowing it to yield ServiceCall objects,
     which are then executed and the results sent back to the coroutine.
@@ -113,6 +115,6 @@ async def kernel_execute_coroutine(
 
 
 async def kernel_main(main: Coroutine):
-    services = TheServiceServiceBackend()
+    services = TheServicesBackend()
     execution_context = current_execution_context()
     await kernel_execute_coroutine(execution_context, services, main)

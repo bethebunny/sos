@@ -1,7 +1,2 @@
-from .service import (
-    Service,
-    ServiceCall,
-    ServiceResult,
-    ServiceService,
-    TheServiceServiceBackend,
-)
+from .service_result import ServiceResult
+from .service import Service, ServiceCall

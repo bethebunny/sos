@@ -1,15 +1,10 @@
-import collections
 import dataclasses
 import functools
 import inspect
-import random
-import re
-import typing
-from typing import Awaitable, Callable, Generic, Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
-T = typing.TypeVar("T")
-
-from ..execution_context import ExecutionContext, current_execution_context
+from .service_result import ServiceResult, ServiceResultImpl, resolve_result
+from sos.execution_context import ExecutionContext, current_execution_context
 
 
 # TODO:
@@ -20,162 +15,6 @@ from ..execution_context import ExecutionContext, current_execution_context
 #       - probably better to make this explicit, ie. you have to mark anything you're not waiting on
 #   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
 #       good target for making stack traces better / easier to read.
-
-
-class ServiceResult(Awaitable[T]):
-    """ServiceResult is the Awaitable / promise type which Service client stub methods
-    return. They act like promises moreso than Awaitables, in that you can await on them
-    as many times as you want, and they'll retain a reference to their result value until
-    they're garbage collected.
-
-    ServiceResults are also special in how they're handled by SystemCalls.
-    There's some set of operations that can be done on them; currently
-        1. attribute access (eg. `result.value`)
-        2. item lookup (eg. `result["key"]` or `result[-3:]`)
-        3. function chaining via .apply, eg. result.apply(lambda x: x + 1)
-
-    The result of any of these operations will give another ServiceResult object
-    (technically a ServiceResult object), which can also be Awaited on.
-
-    Even more importantly though, _these values can be passed into other service calls_.
-    So you don't have to wait on your other service calls to get back, you can start
-    computing on the future results of those things and start sending off even more
-    service calls to be scheduled! The services passed ServiceResult objects as arguments
-    will know how to resolve them, so eg. in cases where there's a large lag time between
-    services, you can batch an entire graph of service calls and computations to the
-    service (or several) and ship them all off at once, only waiting on the round trip
-    a single time!
-    """
-
-    def __init__(self):
-        self._completed = False
-        self._result = None
-        self._exception = None
-
-    def __await__(self) -> T:
-        return self._compute_result().__await__()
-
-    async def _compute_result(self) -> T:
-        # We do all of this so we don't need to think about whether there's multiple
-        # handles to the same Awaitable laying around; python async method coroutines
-        # don't normally implement "promise" semantics, in other words you can't
-        # await on the same Awaitable more than once. ServiceResult is more of a
-        # Promise, ie. you can await on it as many times as you want and get the
-        # same result.
-        if not self._completed:
-            try:
-                # keep resolving until we resolve to a real value
-                self._result = await resolve_result(self.compute_result())
-            except Exception as e:
-                self._exception = e
-            finally:
-                self._completed = True
-        if self._exception is not None:
-            raise self._exception
-        return self._result
-
-    async def compute_result(self):
-        """Subclasses must call __init__ and implement this method."""
-        raise NotImplemented
-
-    def __getattr__(self, attr) -> "ServiceResultAttr":
-        return ServiceResultAttr(self, attr)
-
-    def __getitem__(self, item) -> "ServiceResultItem":
-        return ServiceResultItem(self, item)
-
-    def apply(self, fn: Callable[[T], any]) -> "ServiceResultApply":
-        return ServiceResultApply(self, fn)
-
-    def _repr_expression(self):
-        return_type = self.__orig_class__.__args__[0]
-        return f"{return_type.__module__}.{return_type.__qualname__}"
-
-    def __repr__(self):
-        # TODO: this is the type of thing that makes the interface way more
-        # explorable, so go ham with making it fancy
-        complete = (
-            "success"
-            if self._completed and not self._exception
-            else "failed"
-            if self._completed
-            else "scheduled"
-        )
-        return f"ServiceResult[{self._repr_expression()}] ({complete})"
-
-
-class ServiceResultImpl(ServiceResult, Awaitable[T]):
-    """Direct Service client stub responses."""
-
-    def __init__(self, handle: Awaitable[T]):
-        super().__init__()
-        self._handle = handle
-
-    async def compute_result(self) -> T:
-        return await self._handle
-
-
-P = typing.TypeVar("P")
-
-
-class DerivedServiceResult(ServiceResult[T], Generic[P, T]):
-    """Base class for derived computations done on ServiceResults."""
-
-    async def compute_result(self) -> T:
-        return await self.compute_result_from_parent(await self.parent)
-
-    async def compute_result_from_parent(self, parent: P) -> T:
-        """More useful function for defining derived computations."""
-        raise NotImplemented
-
-
-# TODO: use protocols to better describe this (if possible)
-class ServiceResultAttr(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResult[P], attr: str):
-        super().__init__()
-        self.parent = parent
-        self.attr = attr
-
-    async def compute_result_from_parent(self, parent_result: P) -> T:
-        return getattr(parent_result, self.attr)
-
-    def _repr_expression(self):
-        return f"{self.parent._repr_expression()}.{self.attr}"
-
-
-class ServiceResultItem(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResult[P], item: any):
-        super().__init__()
-        self.parent = parent
-        self.item = item
-
-    async def compute_result_from_parent(self, parent_result: P) -> T:
-        return parent_result[self.item]
-
-    def _repr_expression(self):
-        return f"{self.parent._repr_expression()}[{self.item}]"
-
-
-class ServiceResultApply(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResult[P], fn: Callable[[P], T]):
-        super().__init__()
-        self.parent = parent
-        self.fn = fn
-
-    async def compute_result_from_parent(self, parent_result: P) -> T:
-        # what if self.fn is a service call? will this still work?
-        return self.fn(parent_result)
-
-    def _repr_expression(self):
-        return f"{self.fn}({self.parent._repr_expression()})"
-
-
-async def resolve_result(result):
-    """Resolve a ServiceResult to a result value."""
-    # if we return a ServiceResult, we want to resolve it to a real value
-    while isinstance((result := await result), ServiceResult):
-        pass
-    return result
 
 
 async def resolve_args(args, kwargs):
@@ -268,6 +107,9 @@ async def execute_service_call(service, service_id, endpoint_handle, args, kwarg
         args,
         kwargs,
     )
+
+
+T = TypeVar("T")
 
 
 def wrap_service_call(
@@ -382,102 +224,3 @@ class Service(metaclass=ServiceMeta):
 
     def __init__(self, service_id: Optional[str] = None):
         self.service_id = service_id
-
-
-def _load_words(path: str = "/usr/share/dict/words"):
-    valid_word_re = re.compile(r"^[a-z]{4,7}$")
-    with open(path) as words:
-        for word in map(lambda s: s.strip(), words):
-            if valid_word_re.match(word):
-                yield word
-
-
-_SEMANTIC_HASH_DICT = list(_load_words())
-
-
-def _random_word():
-    return random.choice(_SEMANTIC_HASH_DICT)
-
-
-def semantic_hash(len=2):
-    return "-".join(_random_word() for _ in range(len))
-
-
-class ServiceService(Service):
-    async def register_backend(
-        self,
-        service: type[Service],
-        backend: type[Service.Backend],
-        args: Optional[Service.Backend.Args] = None,
-        service_id: Optional[str] = None,
-    ) -> str:
-        pass
-
-    async def list_services(self) -> list[Service]:
-        pass
-
-    async def list_backends(
-        self, service: type[Service]
-    ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
-        pass
-
-
-# @highlander
-# It probably makes sense to be able to replace this too :)
-# BUT NOT FOR NOW!
-class TheServiceServiceBackend(ServiceService.Backend):
-    def __init__(self):
-        super().__init__()
-        # self._registered: dict[dict[str, Service.Backend]] = collections.defaultdict(dict)
-        # for now there's no difference between "registered" and "running"
-        self._running: dict[
-            type[Service], dict[str, Service.Backend]
-        ] = collections.defaultdict(dict)
-        self._running[ServiceService]["highlander"] = self
-
-    async def register_backend(
-        self,
-        service: type[Service],
-        backend: type[Service.Backend],
-        args: Optional[Service.Backend.Args] = None,
-        service_id: Optional[str] = None,
-    ) -> str:
-        service_id = service_id if service_id is not None else semantic_hash(2)
-        args = args if args is not None else backend.Args()
-
-        impls = self._running[service]
-        # TODO
-        # if service_id in impls:
-        #    raise
-        impls[service_id] = backend(args)
-        return service_id
-
-    async def list_services(self) -> list[Service]:
-        return list(ServiceMeta.SERVICES)
-
-    async def list_backends(
-        self, service: type[Service]
-    ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
-        return [
-            (service_id, type(backend), backend.args)
-            for service_id, backend in self._running.get(service, {}).items()
-        ]
-
-    # TODO: this needs to be privileged, this should only be executed by the kernel
-    #       ... crazy idea, maybe there's a different service interface for it for
-    #       users? or ACTUALLY since I'm not using the client in the kernel I can just
-    #       not add it to the interface!!! genius
-    #       however, the TODO here is now that the kernel doesn't validate system calls,
-    #       so I can leak backends by constructing and yielding a SystemCall that runs
-    #       a method that's not on the interface xD
-    async def get_backend(
-        self, service: type[Service], service_id: Optional[str] = None
-    ) -> Service.Backend:
-        impls = self._running.get(service, {})
-        if service_id is not None:
-            return impls[service_id]
-        else:
-            if not impls:
-                # TODO error types
-                raise RuntimeError(f"no running service found for {service}")
-            return next(iter(impls.values()))

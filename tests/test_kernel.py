@@ -1,7 +1,8 @@
 import dataclasses
 import pytest
 
-from sos.service import Service, ServiceService
+from sos.service import Service
+from sos.services import Services
 
 
 class A(Service):
@@ -36,8 +37,8 @@ class OutsourceA(A.Backend):
 
 @pytest.fixture
 async def services():
-    simple_a_id = await ServiceService().register_backend(A, SimpleA)
-    outsource_a_id = await ServiceService().register_backend(
+    simple_a_id = await Services().register_backend(A, SimpleA)
+    outsource_a_id = await Services().register_backend(
         A,
         OutsourceA,
         OutsourceA.Args(outsource_id=simple_a_id),
@@ -61,7 +62,7 @@ async def test_service_call_makes_service_call(services):
 async def test_service_calls_can_recursively_make_service_calls():
     # since it's the only backend, None means call itself
     # what we're testing here is that we can make an abitrary number of nested system calls
-    outsource_a_id = await ServiceService().register_backend(
+    outsource_a_id = await Services().register_backend(
         A,
         OutsourceA,
         OutsourceA.Args(None),

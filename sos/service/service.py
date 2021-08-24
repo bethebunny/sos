@@ -297,22 +297,30 @@ class ServiceMeta(type):
     SERVICES = []
 
     def __new__(cls, name, bases, namespace):
+        # This could probably be implemented with __init_subclass__
+        # but it's fine as it is for now :)
         print(f"ServiceMeta: Creating service {name}")
 
         client_type = super().__new__(cls, name, bases, namespace)
 
         # vars().update is gone in python3 / mappingproxy
-        for attr, value in namespace.items():
-            if inspect.iscoroutinefunction(value):
-                setattr(client_type, attr, wrap_service_call(client_type, value))
+        endpoints = [
+            attr
+            for attr, value in namespace.items()
+            if inspect.iscoroutinefunction(value)
+        ]
+        for attr in endpoints:
+            setattr(client_type, attr, wrap_service_call(client_type, namespace[attr]))
 
         # TODO: need to think more carefully about what bases should be here.
         #       It definitely shouldn't have Service, but maybe should have
         #       eg. Service.Backend or something?
+        # TODO: name not being saved properly here; it omits `.Backend` which is confusing
         backend_base = type(f"{name}.Backend", (ServiceBackendBase,), namespace)
 
         backend_base.interface = client_type
         client_type.Backend = backend_base
+        client_type.__endpoints__ = endpoints
 
         cls.SERVICES.append(client_type)
 

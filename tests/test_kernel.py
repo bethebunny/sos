@@ -1,7 +1,7 @@
 import dataclasses
 import pytest
 
-from service import Service, ServiceService
+from sos.service import Service, ServiceService
 
 
 class A(Service):
@@ -67,3 +67,8 @@ async def test_service_calls_can_recursively_make_service_calls():
         OutsourceA.Args(None),
     )
     assert (await A().triangle(10)) == 55
+
+
+# TODO: test awaiting on multiple service calls at the same time with a `gather`
+# TODO: test awaiting on a `ServiceResultApply` which is running a different service call
+#       which runs in a different ExecutionContext and validate that ECs apply properly.

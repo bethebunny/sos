@@ -1,6 +1,5 @@
 import dataclasses
 from pathlib import Path
-import traceback
 
 from rich import print
 from rich.console import Console
@@ -9,11 +8,11 @@ from rich.prompt import Prompt
 from rich.table import Table
 import readline
 
-from execution_context import current_execution_context, User
-from kernel_main import kernel_main
+from sos.execution_context import current_execution_context, User
+from sos.kernel_main import kernel_main
 
-from file_service import Files, ProxyFilesystem
-from service import ServiceService
+from sos.file_service import Files, ProxyFilesystem
+from sos.service import ServiceService
 
 
 @dataclasses.dataclass

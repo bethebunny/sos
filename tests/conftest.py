@@ -3,7 +3,7 @@ import functools
 import inspect
 import pytest
 
-from kernel_main import kernel_main
+from sos.kernel_main import kernel_main
 
 # Much of the following was adapted from pytest-asyncio source
 

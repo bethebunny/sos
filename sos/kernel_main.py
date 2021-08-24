@@ -1,7 +1,7 @@
 from typing import Coroutine
 
-from execution_context import ExecutionContext, current_execution_context
-from service import ServiceCall, ServiceService, TheServiceServiceBackend
+from .execution_context import ExecutionContext, current_execution_context
+from .service import ServiceCall, ServiceService, TheServiceServiceBackend
 
 
 # TODO: Errors should be nice, eg. "did you mean...?"
@@ -62,6 +62,12 @@ async def handle_service_call(
         )
 
 
+# TODO: I realized that rather than making this re-entrant for ServiceCalls, it makes
+#       more sense to just implement a basic scheduler and schedule them.
+#       The simplest scheduler will have a list of `coro`s instead of one and decide
+#       which to call into. Next, we can track which ServiceCalls are being awaited
+#       on by which processes, and only move them back to `active` when their service
+#       calls return.
 async def kernel_execute_coroutine(
     ec: ExecutionContext, services: ServiceService.Backend, coro: Coroutine
 ) -> any:

@@ -5,8 +5,8 @@ import pickle
 import time
 import typing
 
-from execution_context import ExecutionContext, current_execution_context
-from service import Service
+from .execution_context import ExecutionContext, current_execution_context
+from .service import Service
 
 
 T = typing.TypeVar("T")
@@ -129,7 +129,6 @@ class FileRecord:
 #         - no versioning at all
 #         - types stored with pickle
 class FilesBackendBase(Files.Backend):
-    __abstract__ = True
     # The Service definition class is both an interface/client and the implementation.
     # When you define a Service class, the metaclass creates the separate
     # implementations, and this becomes a thin client interface. When yielding
@@ -232,10 +231,10 @@ class ProxyFilesystem(Files.Backend):
             args.local_root.mkdir()
 
     def resolve_real_path(self, path: Path) -> Path:
+        path = resolve_path(current_execution_context(), path)
         return self.args.local_root / path.relative_to("/")
 
     async def stat(self, path: Path) -> FileMetadata:
-        path = resolve_path(current_execution_context(), path)
         stat = self.resolve_real_path(path).stat()
         return self._os_stat_to_file_metadata(stat)
 
@@ -243,7 +242,6 @@ class ProxyFilesystem(Files.Backend):
         return FileMetadata(bytes, stat.st_size, stat.st_ctime, stat.st_mtime)
 
     async def read(self, path: Path) -> File:
-        path = resolve_path(current_execution_context(), path)
         real = self.resolve_real_path(path)
         return RawBinaryFile(real.read_bytes())
 
@@ -251,17 +249,10 @@ class ProxyFilesystem(Files.Backend):
         raise NotImplemented
 
     async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
-        # Hmm something's not good. I really don't like having to think this carefully
-        # about joining paths together. Also `cd tests; ls ..` printing the contents
-        # of `tests` is really unintuitive. Maybe `Files` should be allow-listed to
-        # not sandbox by default?
-        ec = current_execution_context()
-        abspath = resolve_path(ec, path)
-
         # TODO: we'd like to be able to implement service calls as generators
         #       but they don't have the same coroutine semantics eg. .send so the kernel
         #       needs to orchestrate them differently.
         return [
             (subpath.name, self._os_stat_to_file_metadata(subpath.stat()))
-            for subpath in self.resolve_real_path(abspath).iterdir()
+            for subpath in self.resolve_real_path(path).iterdir()
         ]

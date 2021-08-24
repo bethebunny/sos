@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, Generic, Optional
 
 T = typing.TypeVar("T")
 
-from execution_context import ExecutionContext, current_execution_context
+from ..execution_context import ExecutionContext, current_execution_context
 
 
 # TODO:
@@ -22,7 +22,31 @@ from execution_context import ExecutionContext, current_execution_context
 #       good target for making stack traces better / easier to read.
 
 
-class ServiceResultBase(Awaitable[T]):
+class ServiceResult(Awaitable[T]):
+    """ServiceResult is the Awaitable / promise type which Service client stub methods
+    return. They act like promises moreso than Awaitables, in that you can await on them
+    as many times as you want, and they'll retain a reference to their result value until
+    they're garbage collected.
+
+    ServiceResults are also special in how they're handled by SystemCalls.
+    There's some set of operations that can be done on them; currently
+        1. attribute access (eg. `result.value`)
+        2. item lookup (eg. `result["key"]` or `result[-3:]`)
+        3. function chaining via .apply, eg. result.apply(lambda x: x + 1)
+
+    The result of any of these operations will give another ServiceResult object
+    (technically a ServiceResult object), which can also be Awaited on.
+
+    Even more importantly though, _these values can be passed into other service calls_.
+    So you don't have to wait on your other service calls to get back, you can start
+    computing on the future results of those things and start sending off even more
+    service calls to be scheduled! The services passed ServiceResult objects as arguments
+    will know how to resolve them, so eg. in cases where there's a large lag time between
+    services, you can batch an entire graph of service calls and computations to the
+    service (or several) and ship them all off at once, only waiting on the round trip
+    a single time!
+    """
+
     def __init__(self):
         self._completed = False
         self._result = None
@@ -50,6 +74,10 @@ class ServiceResultBase(Awaitable[T]):
             raise self._exception
         return self._result
 
+    async def compute_result(self):
+        """Subclasses must call __init__ and implement this method."""
+        raise NotImplemented
+
     def __getattr__(self, attr) -> "ServiceResultAttr":
         return ServiceResultAttr(self, attr)
 
@@ -76,44 +104,21 @@ class ServiceResultBase(Awaitable[T]):
         return f"ServiceResult[{self._repr_expression()}] ({complete})"
 
 
-class ServiceResult(ServiceResultBase, Awaitable[T]):
-    """ServiceResult is the Awaitable / promise type which Service client stub methods
-    return. They act like promises moreso than Awaitables, in that you can await on them
-    as many times as you want, and they'll retain a reference to their result value until
-    they're garbage collected.
-
-    ServiceResults are also special in how they're handled by SystemCalls.
-    There's some set of operations that can be done on them; currently
-        1. attribute access (eg. `result.value`)
-        2. item lookup (eg. `result["key"]` or `result[-3:]`)
-        3. function chaining via .apply, eg. result.apply(lambda x: x + 1)
-
-    The result of any of these operations will give another ServiceResult object
-    (technically a ServiceResultBase object), which can also be Awaited on.
-
-    Even more importantly though, _these values can be passed into other service calls_.
-    So you don't have to wait on your other service calls to get back, you can start
-    computing on the future results of those things and start sending off even more
-    service calls to be scheduled! The services passed ServiceResult objects as arguments
-    will know how to resolve them, so eg. in cases where there's a large lag time between
-    services, you can batch an entire graph of service calls and computations to the
-    service (or several) and ship them all off at once, only waiting on the round trip
-    a single time!
-    """
+class ServiceResultImpl(ServiceResult, Awaitable[T]):
+    """Direct Service client stub responses."""
 
     def __init__(self, handle: Awaitable[T]):
         super().__init__()
         self._handle = handle
 
     async def compute_result(self) -> T:
-        # Override in subclasses
         return await self._handle
 
 
 P = typing.TypeVar("P")
 
 
-class DerivedServiceResult(ServiceResultBase[T], Generic[P, T]):
+class DerivedServiceResult(ServiceResult[T], Generic[P, T]):
     """Base class for derived computations done on ServiceResults."""
 
     async def compute_result(self) -> T:
@@ -126,7 +131,7 @@ class DerivedServiceResult(ServiceResultBase[T], Generic[P, T]):
 
 # TODO: use protocols to better describe this (if possible)
 class ServiceResultAttr(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResultBase[P], attr: str):
+    def __init__(self, parent: ServiceResult[P], attr: str):
         super().__init__()
         self.parent = parent
         self.attr = attr
@@ -139,7 +144,7 @@ class ServiceResultAttr(DerivedServiceResult[P, T]):
 
 
 class ServiceResultItem(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResultBase[P], item: any):
+    def __init__(self, parent: ServiceResult[P], item: any):
         super().__init__()
         self.parent = parent
         self.item = item
@@ -152,7 +157,7 @@ class ServiceResultItem(DerivedServiceResult[P, T]):
 
 
 class ServiceResultApply(DerivedServiceResult[P, T]):
-    def __init__(self, parent: ServiceResultBase[P], fn: Callable[[P], T]):
+    def __init__(self, parent: ServiceResult[P], fn: Callable[[P], T]):
         super().__init__()
         self.parent = parent
         self.fn = fn
@@ -168,7 +173,7 @@ class ServiceResultApply(DerivedServiceResult[P, T]):
 async def resolve_result(result):
     """Resolve a ServiceResult to a result value."""
     # if we return a ServiceResult, we want to resolve it to a real value
-    while isinstance((result := await result), ServiceResultBase):
+    while isinstance((result := await result), ServiceResult):
         pass
     return result
 
@@ -186,11 +191,11 @@ async def resolve_args(args, kwargs):
         # and I haven't figured out how you'd actually make the tuple() example work
         # without allocating the list.
         [
-            (await resolve_result(arg)) if isinstance(arg, ServiceResultBase) else arg
+            (await resolve_result(arg)) if isinstance(arg, ServiceResult) else arg
             for arg in args
         ],
         {
-            k: (await resolve_result(v)) if isinstance(v, ServiceResultBase) else v
+            k: (await resolve_result(v)) if isinstance(v, ServiceResult) else v
             for k, v in kwargs.items()
         },
     )
@@ -283,7 +288,7 @@ def wrap_service_call(
         handle = execute_service_call(
             service, self.service_id, endpoint_handle, args, kwargs
         )
-        return ServiceResult[return_type](handle)
+        return ServiceResultImpl[return_type](handle)
 
     return wrapper
 

@@ -1,11 +1,7 @@
-import asyncio
-from execution_context import current_execution_context
-import functools
-import inspect
+from sos.execution_context import current_execution_context
 from pathlib import Path
-from service import ServiceService
-from file_service import File, Files, InMemoryFilesystem
-from kernel_main import kernel_main
+from sos.service import ServiceService
+from sos.file_service import File, Files, InMemoryFilesystem
 
 import pytest
 

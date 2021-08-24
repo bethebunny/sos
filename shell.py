@@ -1,18 +1,22 @@
+import asyncio
 import dataclasses
 from pathlib import Path
+import readline
 
 from rich import print
 from rich.console import Console
 from rich.pretty import Pretty
 from rich.prompt import Prompt
 from rich.table import Table
-import readline
 
 from sos.execution_context import current_execution_context, User
 from sos.kernel_main import kernel_main
 
 from sos.services import Services
 from sos.services.files import Files, ProxyFilesystem
+
+
+LOCAL_ROOT = Path(".sos-hard-drive")
 
 
 @dataclasses.dataclass
@@ -72,7 +76,7 @@ class Shell:
         await Services().register_backend(
             Files,
             ProxyFilesystem,
-            ProxyFilesystem.Args(local_root=Path(".sos-hard-drive")),
+            ProxyFilesystem.Args(local_root=LOCAL_ROOT),
         )
         while (
             line := Prompt.repl(self.args.user, self.ec.working_directory)
@@ -110,7 +114,13 @@ class Shell:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(kernel_main(Shell(Args(User("stef"))).main()))
+    histfile = LOCAL_ROOT / ".history"
+    try:
+        readline.read_history_file(histfile)
+    except Exception:
+        pass
+    try:
+        loop.run_until_complete(kernel_main(Shell(Args(User("stef"))).main()))
+    finally:
+        readline.write_history_file(histfile)

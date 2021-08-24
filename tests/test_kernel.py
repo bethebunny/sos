@@ -3,6 +3,7 @@ import dataclasses
 import pytest
 
 from sos import service
+from sos.kernel_main import kernel_main
 from sos.service import Service
 from sos.services import Services
 
@@ -46,6 +47,26 @@ async def services():
         OutsourceA.Args(outsource_id=simple_a_id),
     )
     yield (simple_a_id, outsource_a_id)
+
+
+def test_kernel_tests_execute():
+    # Normally doesn't return anything; verify that an exception
+    # will propogate up above the kernel
+
+    class CustomError(Exception):
+        pass
+
+    async def main():
+        raise CustomError
+
+    loop = asyncio.get_event_loop()
+    with pytest.raises(CustomError):
+        loop.run_until_complete(kernel_main(main()))
+
+
+@pytest.mark.kernel
+async def test_noop_coroutine():
+    pass
 
 
 @pytest.mark.kernel

@@ -1,4 +1,5 @@
 import collections
+from pathlib import Path
 from typing import Coroutine, Iterable, Optional, Tuple
 
 from .execution_context import ExecutionContext, current_execution_context
@@ -32,6 +33,11 @@ class InvalidExecutionContextRequested(Error):
 def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionContext):
     """Do security checks; if the requested execution context requests more permissions
     than the current one, reject it and raise an exception."""
+    # this is critical path for system calls, and is a bit sloooow
+    # 80/20 solution right now is to do a quick check here for the common case
+    if ec is requested_ec or str(requested_ec.root).startswith(str(ec.root)):
+        return
+    # fast check failed, do a more thorough check
     # For now just checking that we're not breaking chroot.
     abs_root = ec.root.resolve()
     requested_root = requested_ec.root.resolve()

@@ -48,10 +48,10 @@ class ExecutionContext:
 
     @contextlib.contextmanager
     def active(self):
-        print(f"Activating {self}")
         global _EXECUTION_CONTEXT
         old_execution_context = _EXECUTION_CONTEXT
-        _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
+        if old_execution_context is not self:  # slight optimiation for the common case
+            _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
         try:
             yield
         finally:

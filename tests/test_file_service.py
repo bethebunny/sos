@@ -109,7 +109,7 @@ async def test_shared_file_backend(files):
 @pytest.mark.kernel
 async def test_execution_context_change_directory(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
-    with current_execution_context().full().active():
+    with current_execution_context().nosandbox().active():
         with files.change_directory(Path("/a")):
             assert (await files.read(Path("b/c"))).value == "stuff"
             assert (await files.read(Path("/a/b/c"))).value == "stuff"
@@ -118,7 +118,7 @@ async def test_execution_context_change_directory(files):
 @pytest.mark.kernel
 async def test_execution_context_change_directory_relative_access(files):
     await files.write(Path("/a/b/c"), File[str]("stuff"))
-    with current_execution_context().full().active():
+    with current_execution_context().nosandbox().active():
         with files.change_directory(Path("/a/b/d")):
             assert (await files.read(Path("../c"))).value == "stuff"
 

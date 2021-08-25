@@ -1,2 +1,2 @@
-from .service_result import ServiceResult, gather
-from .service import Service, ServiceCall
+from .service_result import ServiceResult
+from .service import Service, ServiceCall, gather

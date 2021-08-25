@@ -1,8 +1,11 @@
 import asyncio
 import dataclasses
+from pathlib import Path
+from sos.service.service import AwaitScheduled, ScheduleToken
 import pytest
 
 from sos import service
+from sos.execution_context import ExecutionContext, User, current_execution_context
 from sos.kernel_main import kernel_main
 from sos.service import Service
 from sos.services import Services
@@ -94,22 +97,73 @@ async def test_service_calls_can_recursively_make_service_calls():
 
 
 @pytest.mark.kernel
-async def test_service_calls_can_be_awaited_simultaneously_with_gather(services):
-    # TODO: service_result.gather cheats right now :)
-    # This is actually closer to working than I thought o.o
-    # We _probably_ don't want to use asyncio.gather because it has a bunch
-    # of logic that care about event loops and Tasks and such. HOWEVER
-    # digging into it revealed more details about how the event loop works,
-    # and ServiceCall / ServiceResult actually share _a lot_ of concepts with
-    # asyncio.futures.Future. I should read that code more carefully; it's very
-    # possible that the right way to implement most of the "real" code eg.
-    # waiting on sockets, etc. is with Futures, since it looks like they _can_
-    # be yielded up to the event loop.
+async def test_gather(services):
     simple, outsourced = services
-    assert [5, 55] == await service.gather(
+    assert (5, 55) == await service.gather(
         A(simple).inc(4),
         A(outsourced).triangle(10),
     )
+
+
+@pytest.mark.kernel
+async def test_gather_delayed_execution(services):
+    simple, _ = services
+    assert 55 == await service.gather(*(map(A(simple).inc, range(10)))).apply(sum)
+
+
+@pytest.mark.kernel
+async def test_scheduled():
+    pass  # TODO
+
+
+@pytest.mark.kernel
+async def test_scheduled__wait_on_random_token():
+    with pytest.raises(KeyError):
+        await AwaitScheduled(ScheduleToken())
+
+
+@pytest.mark.kernel
+async def test_yield_non_service_call():
+    class CustomSystemCall(AwaitScheduled):
+        @property
+        def token(self):
+            raise RuntimeError("HAHA I BROKE YOUR KERNEL")
+
+        @token.setter
+        def token(self):
+            pass
+
+    with pytest.raises(TypeError):
+        await CustomSystemCall(ScheduleToken())
+
+
+@pytest.mark.skip
+@pytest.mark.kernel
+async def test_service_call_delayed_execution_doesnt_leak_execution_context(services):
+    # In this test we're trying to run some code that would execute in
+    # more than one execution context, in a single await call. We want to verify
+    # That each part runs in the correct context, and that eg. it isn't instead
+    # scheduled (that might just be easier though) or all run by the same user.
+    # There's probably more direct ways we need to be testing each of these things.
+    eca = ExecutionContext(User("a"), root=Path("/sandbox"))
+    ecb = ExecutionContext(User("b"))
+
+    class BOnly(A.Backend):
+        async def inc(self, x):
+            if current_execution_context().user.name != "b":
+                raise Exception
+            return x + 1
+
+    simple, _ = services
+    b_only = Services().register_backend(A, BOnly)
+
+    ### Currently can't even apply awaitable fns :)
+    async def b_inc(x: int) -> int:
+        with ecb.active():
+            return await A(b_only).inc(x)
+
+    with eca.active():
+        assert 3 == await A(simple).inc(1).apply(b_inc)
 
 
 # TODO: test awaiting on a `ServiceResultApply` which is running a different service call

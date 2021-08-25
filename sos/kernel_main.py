@@ -1,9 +1,18 @@
 import collections
-from pathlib import Path
-from typing import Coroutine, Iterable, Optional, Tuple
+import dataclasses
+from os import execlp
+from typing import Coroutine, Iterable, NamedTuple
+import weakref
 
 from .execution_context import ExecutionContext, current_execution_context
-from .service import ServiceCall
+from .service.service import (
+    AwaitScheduled,
+    Service,
+    ServiceCall,
+    Schedule,
+    ScheduleToken,
+    ServiceCallBase,
+)
 from .services import Services
 from .services.services import TheServicesBackend
 
@@ -30,6 +39,99 @@ class InvalidExecutionContextRequested(Error):
     doesn't have."""
 
 
+# use a namedtuple here because we want to unpack them in kernel_main
+class Scheduled(NamedTuple):
+    coro: Coroutine
+    execution_context: ExecutionContext
+    result: any = None
+    threw: bool = False
+
+
+class Scheduler:
+    # Currently a cooperative scheduler.
+    # `ready` contains ready tasks in order, while `waiting` tracks the dependency graph
+    # of tasks. When a task completes via `resolve` or `threw`, mark its dependent tasks
+    # as ready.
+    # TODO: implement pre-emption, allowing on a time or certain events to stop the
+    #       current task and move it back to the `ready` state
+    # TODO: can we use contextvars to eliminate the need to pass ExecutionContext everywhere?
+
+    def __init__(self):
+        # Queues managing ready and waiting tasks
+        self.ready = collections.deque()
+        self.waiting = collections.defaultdict(collections.deque)
+
+        # Weak dicts storing results for scheduled tasks
+        # Once any tasks have dropped their tokens (or closed), the GC will delete them,
+        # which will allow these results to be collected also.
+        self.schedule_tokens = weakref.WeakKeyDictionary()
+        self.scheduled_results = weakref.WeakKeyDictionary()
+
+    def schedule_now(
+        self,
+        coro: Coroutine,
+        ec: ExecutionContext,
+        send_value: any = None,
+        threw: bool = False,
+    ) -> ScheduleToken:
+        """Schedule a coroutine for execution, marked as ready.
+        If `threw`, send_value should be an Exception, otherwise its value
+        will be passed to coro.send.
+        """
+        token = ScheduleToken()
+        self.ready.append(Scheduled(coro, ec, send_value, threw))
+        self.schedule_tokens[token] = coro
+        return token
+
+    def wait_on(
+        self,
+        coro: Coroutine,
+        ec: ExecutionContext,
+        waiting_on: Coroutine,
+    ) -> None:
+        if waiting_on in self.scheduled_results:
+            # We're awaiting on a coro that already finished
+            self.schedule_now(coro, ec, *self.scheduled_results[waiting_on])
+        else:
+            self.waiting[waiting_on].append((coro, ec))
+
+    def wait_on_schedule_token(
+        self, coro: Coroutine, ec: ExecutionContext, token: ScheduleToken
+    ):
+        """Wait on a previously scheduled execution."""
+        try:
+            waiting_on = self.schedule_tokens[token]
+        except KeyError as e:
+            self.schedule_now(coro, ec, e, True)
+        else:
+            return self.wait_on(coro, ec, waiting_on)
+
+    def resolve(self, coro: Coroutine, value: any) -> None:
+        """Mark a coroutine as successfully resolved. Move others waiting on it to ready."""
+        for waiting, ec in self.waiting.pop(coro, ()):
+            self.schedule_now(waiting, ec, value)
+
+        # Always store results; it's a weak key dict so if nothing's waiting they'll be GCed later
+        self.scheduled_results[coro] = (value, False)
+
+    def threw(self, coro: Coroutine, exc: Exception) -> None:
+        """Mark a coroutine having resolved with an exception. Move others waiting on it to ready."""
+        for waiting, ec in self.waiting.pop(coro, ()):
+            self.schedule_now(waiting, ec, exc, threw=True)
+
+        # Always store results; it's a weak key dict so if nothing's waiting they'll be GCed later
+        self.scheduled_results[coro] = (exc, True)
+
+    def __iter__(self) -> Iterable[Scheduled]:
+        """Loop through the ready scheduled coroutines until their are none.
+        Unless re-scheduled, yielded coroutines and results are removed from the queue.
+        """
+        while True:
+            if not self.ready:
+                return
+            yield self.ready.popleft()
+
+
 def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionContext):
     """Do security checks; if the requested execution context requests more permissions
     than the current one, reject it and raise an exception."""
@@ -45,48 +147,6 @@ def validate_execution_context(ec: ExecutionContext, requested_ec: ExecutionCont
         raise InvalidExecutionContextRequested(
             f"New root was not a subset of the old root: {requested_ec.root}"
         )
-
-
-class Scheduler:
-    # Currently a cooperative scheduler.
-    # `ready` contains ready tasks in order, while `waiting` tracks the dependency graph
-    # of tasks. When a task completes via `resolve` or `threw`, mark its dependent tasks
-    # as ready. For now a task may only be waiting on 1 task at once.
-    # TODO: allow waiting on multiple tasks simultaneously for `gather`
-    # TODO: implement pre-emption, allowing on a time or certain events to stop the
-    #       current task and move it back to the `ready` state
-    # TODO: can we use contextvars to eliminate the need to pass ExecutionContext everywhere?
-
-    def __init__(self):
-        self.ready = collections.deque()
-        self.waiting = collections.defaultdict(collections.deque)
-
-    def schedule(
-        self,
-        coro: Coroutine,
-        ec: ExecutionContext,
-        waiting_on: Optional[Coroutine] = None,
-    ) -> None:
-        if waiting_on is None:
-            self.ready.append((None, False, ec, coro))
-        else:
-            self.waiting[waiting_on].append((ec, coro))
-
-    def resolve(self, coro: Coroutine, value: any) -> None:
-        self.ready.extend(
-            (value, False, ec, waiting) for ec, waiting in self.waiting.pop(coro, ())
-        )
-
-    def threw(self, coro: Coroutine, exc: Exception) -> None:
-        self.ready.extend(
-            (exc, True, ec, waiting) for ec, waiting in self.waiting.pop(coro, ())
-        )
-
-    def __iter__(self) -> Iterable[Tuple[any, bool, ExecutionContext, Coroutine]]:
-        while True:
-            if not self.ready:
-                return
-            yield self.ready.popleft()
 
 
 async def handle_service_call(
@@ -109,43 +169,89 @@ async def handle_service_call(
         return await endpoint(*service_call.args, **service_call.kwargs)
 
 
-async def kernel_main(main: Coroutine) -> any:
-    """Orchestrates a program (main), allowing it to yield ServiceCall objects,
-    which are then executed and the results sent back to the coroutine.
-    Also manages execution context including validation and security checks,
-    and manages looking up (and possibly starting) service backends.
+async def handle_scheduled(ec: ExecutionContext, scheduled: Schedule) -> any:
+    requested_ec = scheduled.execution_context
+    validate_execution_context(ec, requested_ec)
+    with requested_ec.active():
+        return await scheduled.awaitable
 
-    Make sure to use fine grained errors.
-    Also, tracebacks are good! System should be developer friendly,
-    err on the side of more info even if it exposes system internals.
-    """
-    # Set up the core system state: the services backend, scheduler, and root permissions.
-    services = TheServicesBackend()
-    root_ec = current_execution_context()
-    scheduler = Scheduler()
 
-    # Schedule main to run as root.
-    scheduler.schedule(main, root_ec)
+@dataclasses.dataclass
+class Kernel:
+    services: Service.Backend
+    root_ec: ExecutionContext
+    scheduler: Scheduler
 
-    # Iterate over ready tasks in the scheduler. If they `raise` we, we keep the
-    # result to `.throw` to any waiting tasks, otherwise we pass it via `.send`.
-    for result, threw, ec, coro in scheduler:
-        # Execute the coroutine until it yields a ServiceCall or Future object.
-        # When send or throw raise StopIteration, the coroutine has exited.
-        try:
-            if threw:
-                exc = result
-                service_call = coro.throw(type(exc), exc.args, exc.__traceback__)
-            else:
-                service_call = coro.send(result)
-        except StopIteration as e:
-            scheduler.resolve(coro, e.value)
-        except Exception as e:
-            if coro is main:
-                raise e
-            scheduler.threw(coro, e)
-        else:
-            service_call_coro = handle_service_call(ec, services, service_call)
+    def schedule_service_call(
+        self,
+        coro: Coroutine,
+        service_call: ServiceCallBase,
+        ec: ExecutionContext,
+    ):
+        """Schedule a ServiceCall object with the Scheduler. Different ServiceCall
+        classes have different ways they interact with the scheduler."""
+        # Do explicit type checking here; these are objects passed by user code
+        # and we don't want to just execute arbitrary code here.
+        if type(service_call) is ServiceCall:
+            service_call_coro = handle_service_call(ec, self.services, service_call)
             # Mark the coro as waiting on the service call and schedule service call
-            scheduler.schedule(coro, ec, waiting_on=service_call_coro)
-            scheduler.schedule(service_call_coro, ec)
+            self.scheduler.wait_on(coro, ec, service_call_coro)
+            self.scheduler.schedule_now(service_call_coro, ec)
+
+        elif type(service_call) is Schedule:
+            token = self.scheduler.schedule_now(handle_scheduled(ec, service_call), ec)
+            self.scheduler.schedule_now(coro, ec, token)
+
+        elif type(service_call) is AwaitScheduled:
+            self.scheduler.wait_on_schedule_token(coro, ec, service_call.token)
+
+        else:
+            exc = TypeError(f"Coroutine yielded non-ServiceCall {service_call}")
+            self.scheduler.schedule_now(coro, ec, exc, True)
+
+    async def main(self, main: Coroutine) -> any:
+        """Orchestrates a program (main), allowing it to yield ServiceCall objects,
+        which are then executed and the results sent back to the coroutine.
+        Also manages execution context including validation and security checks,
+        and manages looking up (and possibly starting) service backends.
+
+        Make sure to use fine grained errors.
+        Also, tracebacks are good! System should be developer friendly,
+        err on the side of more info even if it exposes system internals.
+        """
+        # Set up the core system state: the services backend, scheduler, and root permissions.
+        services = TheServicesBackend()
+        root_ec = current_execution_context()
+        scheduler = Scheduler()
+
+        # Schedule main to run as root.
+        self.scheduler.schedule_now(main, root_ec)
+
+        # Iterate over ready tasks in the scheduler. If they `raise` we, we keep the
+        # result to `.throw` to any waiting tasks, otherwise we pass it via `.send`.
+        for coro, ec, result, threw in self.scheduler:
+            # Execute the coroutine until it yields a ServiceCall or Future object.
+            # When send or throw raise StopIteration, the coroutine has exited.
+            try:
+                if threw:
+                    exc = result
+                    service_call = coro.throw(type(exc), exc.args, exc.__traceback__)
+                else:
+                    service_call = coro.send(result)
+            except StopIteration as e:
+                scheduler.resolve(coro, e.value)
+            except Exception as e:
+                if coro is main:
+                    raise e
+                scheduler.threw(coro, e)
+            else:
+                self.schedule_service_call(coro, service_call, ec)
+
+
+async def kernel_main(main: Coroutine) -> any:
+    kernel = Kernel(
+        services=TheServicesBackend(),
+        root_ec=current_execution_context(),
+        scheduler=Scheduler(),
+    )
+    return await kernel.main(main)

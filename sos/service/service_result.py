@@ -160,9 +160,3 @@ async def resolve_result(result):
     while isinstance((result := await result), ServiceResult):
         pass
     return result
-
-
-async def gather(*results: ServiceResult) -> list[any]:
-    # TODO: once we have a scheduler this will schedule both; for now it
-    #       runs them in series.
-    return [await result for result in results]

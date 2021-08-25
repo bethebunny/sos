@@ -1,7 +1,7 @@
 import dataclasses
 import functools
 import inspect
-from typing import Awaitable, Callable, Optional, TypeVar
+from typing import Awaitable, Callable, Generic, Optional, Tuple, TypeVar
 
 from .service_result import ServiceResult, ServiceResultImpl, resolve_result
 from sos.execution_context import ExecutionContext, current_execution_context
@@ -40,8 +40,30 @@ async def resolve_args(args, kwargs):
     )
 
 
+class ServiceCallBase:
+    def __await__(self):
+        # This is the key of how this whole system works. `await`ing on a ServiceCall
+        # instance yields the coroutine down into `kernel_main`, which can then validate
+        # and execute the call. In normal asyncio this would be illegial; in the normal
+        # event loops, yielding a value is illegal and throws a RuntimeException. This
+        # is implementation specific to the asyncio library; rather async and await
+        # methods are just coroutines and yielding values is fine! Since we can
+        # orchestrate the coroutine entirely on our own from kernel_main, the underlying
+        # event loop never sees the yielded value, and we're free to use async/await
+        # syntax for coroutines like we want :)
+        #
+        # when kernel_main does `send`, yield returns a value, ie. the service call result;
+        # that's what we return here, and then awaiting on the ServiceCall gives the
+        # return value from the actual call.
+        #
+        # It's possible that there should be a debug flag which shows the full stack trace
+        # (current behavior) but by default remove the kernel aspects; they're already
+        # muddying the stack quite a bit, but at least for now it's still informative.
+        return (yield self)
+
+
 @dataclasses.dataclass
-class ServiceCall:
+class ServiceCall(ServiceCallBase):
     """Data class for a ServiceCall to be passed down to the kernel to execute.
     Simply we're the kernel to execute the following:
 
@@ -65,25 +87,55 @@ class ServiceCall:
     args: list[any]
     kwargs: dict[str, any]
 
-    def __await__(self):
-        # This is the key of how this whole system works. `await`ing on a ServiceCall
-        # instance yields the coroutine down into `kernel_main`, which can then validate
-        # and execute the call. In normal asyncio this would be illegial; in the normal
-        # event loops, yielding a value is illegal and throws a RuntimeException. This
-        # is implementation specific to the asyncio library; rather async and await
-        # methods are just coroutines and yielding values is fine! Since we can
-        # orchestrate the coroutine entirely on our own from kernel_main, the underlying
-        # event loop never sees the yielded value, and we're free to use async/await
-        # syntax for coroutines like we want :)
-        #
-        # when kernel_main does `send`, yield returns a value, ie. the service call result;
-        # that's what we return here, and then awaiting on the ServiceCall gives the
-        # return value from the actual call.
-        #
-        # It's possible that there should be a debug flag which shows the full stack trace
-        # (current behavior) but by default remove the kernel aspects; they're already
-        # muddying the stack quite a bit, but at least for now it's still informative.
-        return (yield self)
+
+T = TypeVar("T")
+
+
+# TODO: the kernel and ServiceResult deleter should coordinate to automatically
+#       schedule calls which were created but never awaited (or maybe error instead).
+# TODO: "schedule" also being an english noun for a time plan is awkward
+@dataclasses.dataclass
+class Schedule(ServiceCallBase, Generic[T]):
+    """A ServiceCall that schedules a ServiceResult or coroutine. This adds
+    the coroutine to the Scheduler queue as ready, but doesn't wait on it yet.
+    You can await on it or not in your process later, and use normal ServiceResult
+    semantics on it ie. deferred computation.
+    """
+
+    execution_context: ExecutionContext
+    awaitable: Awaitable[T]
+
+
+class ScheduleToken:
+    """Special token used by the Scheduler to track scheduled results."""
+
+
+@dataclasses.dataclass
+class AwaitScheduled(ServiceCallBase):
+    """Wait on a previously scheduled coroutine."""
+
+    token: ScheduleToken
+
+
+async def schedule(coro: Awaitable[T]) -> ServiceResult[T]:
+    """Schedule a coroutine or service call to be put into the task pool.
+    It will run in "parallel", and can either be awaited on or not. Even
+    if it is never awaited, it will eventually complete."""
+    if not isinstance(coro, ServiceResult):
+        coro = ServiceResultImpl(coro)
+    token = await Schedule(current_execution_context(), coro)
+    return AwaitScheduled(token)
+
+
+def gather(*calls: Awaitable[any]) -> ServiceResult[Tuple[any]]:
+    """Await on any number of awaitable coroutines or service calls. They
+    can be executed in parallel before re-scheduling this task."""
+    return ServiceResultImpl[Tuple[any]](_gather(calls))
+
+
+async def _gather(calls: Awaitable[any]) -> Tuple[any]:
+    all_scheduled = [await schedule(call) for call in calls]
+    return tuple([await scheduled for scheduled in all_scheduled])
 
 
 async def execute_service_call(service, service_id, endpoint_handle, args, kwargs):
@@ -107,9 +159,6 @@ async def execute_service_call(service, service_id, endpoint_handle, args, kwarg
         args,
         kwargs,
     )
-
-
-T = TypeVar("T")
 
 
 def wrap_service_call(

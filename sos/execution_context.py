@@ -27,8 +27,8 @@ ROOT = User("root")
 @dataclasses.dataclass(frozen=True)
 class ExecutionContext:
     user: User
-    root: Path
-    working_directory: Path
+    root: Path = Path("/")
+    working_directory: Path = Path("/")
     # if sandbox, then by default activating will chroot
     sandbox: bool = True
 
@@ -58,7 +58,7 @@ class ExecutionContext:
             _EXECUTION_CONTEXT = old_execution_context
 
 
-_EXECUTION_CONTEXT = ExecutionContext(ROOT, Path("/"), Path("/"))
+_EXECUTION_CONTEXT = ExecutionContext(ROOT)
 
 # WARNING: THINK ABOUT THIS A LOT SOMETIME
 # Potential for security holes here. For instance, if we can pass a callback

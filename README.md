@@ -2,7 +2,7 @@
 A python coroutine-based OS prototype based on strongly typed Services as system components.
 
 The core ideas of the system are that
-- The one system call is the Service call
+- The one system call is the `ServiceCall`
 - Services and their methods are strongly typed
 - All Service methods and scheduled code (eg. `main`) are `async` functions
 - The system doesn't really care where a service is running -- even core services could be remote!

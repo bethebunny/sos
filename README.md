@@ -14,6 +14,7 @@ The core ideas of the system are that
 More implementation details
 - Service implementations can be viewed, registered, and swapped out via the `Services` service
 - `await schedule(...)` and `await gather(...)` for simple and powerful concurrency
+- [ProxyFilesystem](https://github.com/bethebunny/sos/blob/master/sos/services/files.py#L223), [Shell.main](https://github.com/bethebunny/sos/blob/master/shell.py#L76) and [Kernel.main](https://github.com/bethebunny/sos/blob/master/sos/kernel_main.py#L212) are nice places to jump into the code to see real examples or understand more about the details.
 
 ## Installation
 

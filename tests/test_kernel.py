@@ -11,6 +11,10 @@ from sos.service import Service, ServiceCall
 from sos.services import Services
 
 
+# TODO:
+#  - move many of these tests to test_service.py or test_services.py
+
+
 class A(Service):
     async def inc(self, x: int) -> int:
         pass
@@ -94,6 +98,21 @@ async def test_service_calls_can_recursively_make_service_calls():
         OutsourceA.Args(None),
     )
     assert (await A().triangle(10)) == 55
+
+
+@pytest.mark.kernel
+async def test_clientmethod():
+    class B(Service):
+        async def inc(self, x: int) -> int:
+            pass
+
+        @service.clientmethod
+        async def client_inc(self, x: int) -> int:
+            return x + 1
+
+    with pytest.raises(ServiceNotFound):
+        await B().inc(0)
+    assert (await B().client_inc(0)) == 1
 
 
 @pytest.mark.kernel

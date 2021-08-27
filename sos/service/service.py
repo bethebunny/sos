@@ -8,10 +8,13 @@ from sos.execution_context import ExecutionContext, current_execution_context
 
 
 # TODO:
-#   - when an exception is thrown, un-awaited tasks leak (should be cancelled)
 #   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
 #       good target for making stack traces better / easier to read.
 #   - Errors should be nice, eg. "did you mean...?"
+#   - .Backend class names are confusingly not including the .Backend in the repr.
+#   - if a Service inherits from another Service, its Backend class should also
+#       inherit from that service's Backend class (for subclass checks etc)
+#   - clean up Service documentation
 
 
 class Error(Exception):
@@ -104,9 +107,6 @@ class ServiceCall(ServiceCallBase):
 T = TypeVar("T")
 
 
-# TODO: the kernel and ServiceResult deleter should coordinate to automatically
-#       schedule calls which were created but never awaited (or maybe error instead).
-# TODO: "schedule" also being an english noun for a time plan is awkward
 @dataclasses.dataclass
 class Schedule(ServiceCallBase, Generic[T]):
     """A ServiceCall that schedules a ServiceResult or coroutine. This adds
@@ -211,13 +211,11 @@ class ServiceMeta(type):
             attr
             for attr, value in namespace.items()
             if inspect.iscoroutinefunction(value)
+            and not getattr(value, "__is_client_method__", False)
         ]
         for attr in endpoints:
             setattr(client_type, attr, wrap_service_call(client_type, namespace[attr]))
 
-        # TODO: name not being saved properly here; it omits `.Backend` which is confusing
-        # TODO: if a service inherits from another service, its Backend class should also
-        #       inherit from that service's Backend class (for subclass checks etc)
         backend_base = type(f"{name}.Backend", (ServiceBackendBase,), namespace)
 
         backend_base.interface = client_type
@@ -230,8 +228,8 @@ class ServiceMeta(type):
 
 
 class ServiceBackendBase:
-    # This can't actually inherit from Service.Backend because Service.Backend inherits
-    # from this :)
+    # can't actually inherit from Service.Backend because Service.Backend inherits from us :)
+
     @dataclasses.dataclass
     class Args:
         pass
@@ -241,6 +239,13 @@ class ServiceBackendBase:
 
     async def health_check(self) -> bool:
         return True
+
+
+def clientmethod(method):
+    """Decorator to mark an async method on a Service as being client-side code. Rather
+    than be stubbed out to await a ServiceCall, it will retain its real code and definition."""
+    method.__is_client_method__ = True
+    return method
 
 
 class Service(metaclass=ServiceMeta):

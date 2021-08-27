@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 from pathlib import Path
+import re
 import readline
 
 from rich import print
@@ -109,6 +110,33 @@ class Shell:
                             if service.__name__ == args[2]:
                                 backends = await Services().list_backends(service)
                                 print(tabular(backends))
+                if args[0] == "call":
+                    service_name, service_id = re.match(
+                        r"^(\w+)(?:\((.*)\))?$", args[1]
+                    ).groups()
+                    endpoint_name = args[2]
+
+                    def _eval(s) -> any:
+                        try:
+                            return eval(s)
+                        except Exception:
+                            return s
+
+                    call_args = [_eval(arg) for arg in args[3:]]
+                    with self.ec.active():
+                        services = await Services().list_services()
+                        for service in services:
+                            if service.__name__ == service_name:
+                                service_handle = service(service_id)
+                                endpoint = getattr(service_handle, endpoint_name)
+                                result = await endpoint(*call_args)
+                                if not isinstance(result, str) and hasattr(
+                                    result, "__iter__"
+                                ):
+                                    print(tabular(result))
+                                else:
+                                    print(repr(result))
+                                break
             except Exception as e:
                 Console().print_exception(show_locals=False)
 

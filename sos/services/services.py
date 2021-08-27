@@ -1,4 +1,5 @@
 import collections
+import dataclasses
 import random
 import re
 from typing import Optional
@@ -7,7 +8,7 @@ from sos.service.service import Service, ServiceMeta
 
 
 def _load_words(path: str = "/usr/share/dict/words"):
-    valid_word_re = re.compile(r"^[a-z]{4,7}$")
+    valid_word_re = re.compile(r"^[a-z]{4,8}$")
     with open(path) as words:
         for word in map(lambda s: s.strip(), words):
             if valid_word_re.match(word):
@@ -25,6 +26,13 @@ def semantic_hash(len=2):
     return "-".join(_random_word() for _ in range(len))
 
 
+@dataclasses.dataclass
+class BackendRegistryRecord:
+    service_id: str
+    type: type[Service.Backend]
+    args: Service.Backend.Args
+
+
 class Services(Service):
     async def register_backend(
         self,
@@ -33,29 +41,49 @@ class Services(Service):
         args: Optional[Service.Backend.Args] = None,
         service_id: Optional[str] = None,
     ) -> str:
-        pass
+        """Register a new Service implementation for a Service.
+        This is the core way that new system components are added.
+        If a service_id is not provided, a human-friendly one will be generated :)
+
+        >>> await Services().register_backend(Files, InMemoryFilesystem)
+        'fragrant-avatar'
+
+        >>> await Services().register_backend(
+        ...     Files,
+        ...     ProxyFilesystem,
+        ...     ProxyFilesystem.Args(local_root=Path(".sos-hard-drive")),
+        ...     service_id="custom-service-id",
+        ... )
+        'custom-service-id'
+        """
 
     async def list_services(self) -> list[Service]:
-        pass
+        """List available Service APIs. This will return any know Service interface,
+        not only those that have backends registered.
+
+        >>> await Services().list_services()
+        [Service, Files, Services, Logs]
+        """
 
     async def list_backends(
         self, service: type[Service]
-    ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
-        pass
+    ) -> list[BackendRegistryRecord]:
+        """Return a list of all registered backends for a given Service type, and their IDs.
+        Useful for introspecting the system to find running services, and routing service calls.
+        For instance it would be easy to build a load balancing client on top of this.
+
+        >>> await Services().list_backends(Services)
+        [BackendRegistryRecord(service_id="highlander", TheServicesBackend, Service.Backend.Args())]
+        """
 
 
-# @highlander
-# It probably makes sense to be able to replace this too :)
-# BUT NOT FOR NOW!
 class TheServicesBackend(Services.Backend):
     def __init__(self):
         super().__init__()
-        # self._registered: dict[dict[str, Service.Backend]] = collections.defaultdict(dict)
         # for now there's no difference between "registered" and "running"
         self._running: dict[
             type[Service], dict[str, Service.Backend]
         ] = collections.defaultdict(dict)
-        self._running[Services]["highlander"] = self
 
     async def register_backend(
         self,
@@ -66,12 +94,7 @@ class TheServicesBackend(Services.Backend):
     ) -> str:
         service_id = service_id if service_id is not None else semantic_hash(2)
         args = args if args is not None else backend.Args()
-
-        impls = self._running[service]
-        # TODO
-        # if service_id in impls:
-        #    raise
-        impls[service_id] = backend(args)
+        self.register_backend_instance(service, backend(args), service_id)
         return service_id
 
     async def list_services(self) -> list[Service]:
@@ -85,21 +108,24 @@ class TheServicesBackend(Services.Backend):
             for service_id, backend in self._running.get(service, {}).items()
         ]
 
-    # TODO: this needs to be privileged, this should only be executed by the kernel
-    #       ... crazy idea, maybe there's a different service interface for it for
-    #       users? or ACTUALLY since I'm not using the client in the kernel I can just
-    #       not add it to the interface!!! genius
-    #       however, the TODO here is now that the kernel doesn't validate system calls,
-    #       so I can leak backends by constructing and yielding a SystemCall that runs
-    #       a method that's not on the interface xD
-    async def get_backend(
+    def register_backend_instance(
+        self, service: type[Service], instance: Service.Backend, service_id: str
+    ):
+        for service_implemented in service.__mro__:
+            if issubclass(service_implemented, Service):
+                # TODO: what if it's already running?
+                self._running[service_implemented][service_id] = instance
+
+    def get_backend(
         self, service: type[Service], service_id: Optional[str] = None
     ) -> Service.Backend:
         impls = self._running.get(service, {})
         if service_id is not None:
+            if service_id not in impls:
+                raise RuntimeError(f"no {service} backend running with ID {service_id}")
             return impls[service_id]
         else:
             if not impls:
                 # TODO error types
-                raise RuntimeError(f"no running service found for {service}")
+                raise RuntimeError(f"no running backend found for {service}")
             return next(iter(impls.values()))

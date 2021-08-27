@@ -190,7 +190,6 @@ class ServiceMeta(type):
     def __new__(cls, name, bases, namespace):
         # This could probably be implemented with __init_subclass__
         # but it's fine as it is for now :)
-        print(f"ServiceMeta: Creating service {name}")
 
         client_type = super().__new__(cls, name, bases, namespace)
 
@@ -203,10 +202,9 @@ class ServiceMeta(type):
         for attr in endpoints:
             setattr(client_type, attr, wrap_service_call(client_type, namespace[attr]))
 
-        # TODO: need to think more carefully about what bases should be here.
-        #       It definitely shouldn't have Service, but maybe should have
-        #       eg. Service.Backend or something?
         # TODO: name not being saved properly here; it omits `.Backend` which is confusing
+        # TODO: if a service inherits from another service, its Backend class should also
+        #       inherit from that service's Backend class (for subclass checks etc)
         backend_base = type(f"{name}.Backend", (ServiceBackendBase,), namespace)
 
         backend_base.interface = client_type
@@ -219,12 +217,17 @@ class ServiceMeta(type):
 
 
 class ServiceBackendBase:
+    # This can't actually inherit from Service.Backend because Service.Backend inherits
+    # from this :)
     @dataclasses.dataclass
     class Args:
         pass
 
     def __init__(self, args: Optional[Args] = None):
         self.args = args or self.Args()
+
+    async def health_check(self) -> bool:
+        return True
 
 
 class Service(metaclass=ServiceMeta):
@@ -273,3 +276,6 @@ class Service(metaclass=ServiceMeta):
 
     def __init__(self, service_id: Optional[str] = None):
         self.service_id = service_id
+
+    async def health_check(self) -> bool:
+        """Basic service instance health check."""

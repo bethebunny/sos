@@ -1,6 +1,7 @@
 import collections
 import dataclasses
 from os import execlp
+import traceback
 from typing import Coroutine, Iterable, NamedTuple
 import weakref
 
@@ -45,6 +46,23 @@ class Scheduled(NamedTuple):
     execution_context: ExecutionContext
     result: any = None
     threw: bool = False
+
+
+@dataclasses.dataclass
+class ThrewResult:
+    _exception: Exception
+    waited_on: bool = False
+
+    @property
+    def exception(self):
+        self.waited_on = True
+        return self._exception
+
+    def __del__(self):
+        if not self.waited_on:
+            print("Scheduled coroutine threw exception never surfaced")
+            exc = self._exception
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 class Scheduler:
@@ -102,12 +120,15 @@ class Scheduler:
         try:
             waiting_on = self.schedule_tokens[token]
         except KeyError as e:
-            self.schedule_now(coro, ec, e, True)
+            self.schedule_now(coro, ec, ThrewResult(e), True)
         else:
             self.wait_on(coro, ec, waiting_on)
 
     def resolve(self, coro: Coroutine, value: any, threw: bool) -> None:
         """Mark a coroutine as resolved. Move others waiting on it to ready."""
+        # Wrap thrown exceptions to track whether they were ever surfaced
+        value = ThrewResult(value) if threw else value
+
         for waiting, ec in self.waiting.pop(coro, ()):
             self.schedule_now(waiting, ec, value, threw=threw)
 
@@ -152,10 +173,10 @@ async def handle_service_call(
     """
     requested_ec = service_call.execution_context
     validate_execution_context(ec, requested_ec)
-    # we guarantee that the Services will not make system calls
-    backend = await services.get_backend(service_call.service, service_call.service_id)
-    if not hasattr(backend, service_call.endpoint):
+    if service_call.endpoint not in service_call.service.__endpoints__:
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
+
+    backend = services.get_backend(service_call.service, service_call.service_id)
     endpoint = getattr(backend, service_call.endpoint)
     with requested_ec.active():
         return await endpoint(*service_call.args, **service_call.kwargs)
@@ -211,13 +232,8 @@ class Kernel:
         Also, tracebacks are good! System should be developer friendly,
         err on the side of more info even if it exposes system internals.
         """
-        # Set up the core system state: the services backend, scheduler, and root permissions.
-        services = TheServicesBackend()
-        root_ec = current_execution_context()
-        scheduler = Scheduler()
-
         # Schedule main to run as root.
-        self.scheduler.schedule_now(main, root_ec)
+        self.scheduler.schedule_now(main, self.root_ec)
 
         # Iterate over ready tasks in the scheduler. If they `raise` we, we keep the
         # result to `.throw` to any waiting tasks, otherwise we pass it via `.send`.
@@ -226,23 +242,25 @@ class Kernel:
             # When send or throw raise StopIteration, the coroutine has exited.
             try:
                 if threw:
-                    exc = result
+                    exc = result.exception
                     service_call = coro.throw(type(exc), exc.args, exc.__traceback__)
                 else:
                     service_call = coro.send(result)
             except StopIteration as e:
-                scheduler.resolve(coro, e.value, threw=False)
+                self.scheduler.resolve(coro, e.value, threw=False)
             except Exception as e:
                 if coro is main:
                     raise e
-                scheduler.resolve(coro, e, threw=True)
+                self.scheduler.resolve(coro, e, threw=True)
             else:
                 self.schedule_service_call(coro, service_call, ec)
 
 
 async def kernel_main(main: Coroutine) -> any:
+    services = TheServicesBackend()
+    services.register_backend_instance(Services, services, "highlander")
     kernel = Kernel(
-        services=TheServicesBackend(),
+        services=services,
         root_ec=current_execution_context(),
         scheduler=Scheduler(),
     )

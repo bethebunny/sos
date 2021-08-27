@@ -81,7 +81,7 @@ class Remote:
                 f"No local service backend found to pretend for {self.interface}"
             )
 
-    _class_cache: dict[Type[Service] : Type["Remote"]] = {}
+    _class_cache: dict[Type[Service], Type["Remote"]] = {}
 
     @classmethod
     def __class_getitem__(cls, item):

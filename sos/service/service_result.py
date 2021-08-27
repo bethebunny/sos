@@ -4,13 +4,28 @@ from typing import Awaitable, Callable, Generic
 T = typing.TypeVar("T")
 
 
+# TODO
+#   - reduce the call stack overhead of these functions
+#   - figure out a way to be able to pass deferred computations down to the kernel
+#       in a way that it will know the ServiceCall they plan to execute;
+#       probably use ScheduleToken() also. Then the kernel can implement time-travel
+#       implicitly for computation graphs including eg. gather as currently implemented
+#       by just batching multiple awaiting requests to a remote service.
+#   - better reprs -- this is the sort of thing that makes interfaces nicer / more
+#       discoverable, so really can't get too fancy, go ham here
+#   - use protocols or other to better describe types of derived ServiceResults.
+#   - more judicious / well reasoned use of resolve_result; right now I think it's
+#       just sort of applied everywhere it might be needed :)
+#   - think about whether and how ServiceResultApply applies to async / non-async fns
+
+
 class ServiceResult(Awaitable[T]):
     """ServiceResult is the Awaitable / promise type which Service client stub methods
     return. They act like promises moreso than Awaitables, in that you can await on them
     as many times as you want, and they'll retain a reference to their result value until
     they're garbage collected.
 
-    ServiceResults are also special in how they're handled by SystemCalls.
+    ServiceResults are also special in how they're handled by await.
     There's some set of operations that can be done on them; currently
         1. attribute access (eg. `result.value`)
         2. item lookup (eg. `result["key"]` or `result[-3:]`)
@@ -27,6 +42,9 @@ class ServiceResult(Awaitable[T]):
     services, you can batch an entire graph of service calls and computations to the
     service (or several) and ship them all off at once, only waiting on the round trip
     a single time!
+
+    A ServiceResult is a Promise rather than a Future, so it's fine to await on it
+    multiple times.
     """
 
     def __init__(self):
@@ -38,17 +56,9 @@ class ServiceResult(Awaitable[T]):
         return self._compute_result().__await__()
 
     async def _compute_result(self) -> T:
-        # We do all of this so we don't need to think about whether there's multiple
-        # handles to the same Awaitable laying around; python async method coroutines
-        # don't normally implement "promise" semantics, in other words you can't
-        # await on the same Awaitable more than once. ServiceResult is more of a
-        # Promise, ie. you can await on it as many times as you want and get the
-        # same result.
         if not self._completed:
             try:
                 # keep resolving until we resolve to a real value
-                # TODO: figure out if I definitely need this, it feels like
-                #       this is better handled as logic in `execute_service_call`
                 self._result = await resolve_result(self.compute_result())
             except Exception as e:
                 self._exception = e
@@ -60,7 +70,7 @@ class ServiceResult(Awaitable[T]):
 
     async def compute_result(self):
         """Subclasses must call __init__ and implement this method."""
-        raise NotImplemented
+        raise NotImplementedError
 
     def __getattr__(self, attr) -> "ServiceResultAttr":
         return ServiceResultAttr(self, attr)
@@ -76,8 +86,6 @@ class ServiceResult(Awaitable[T]):
         return f"{return_type.__module__}.{return_type.__qualname__}"
 
     def __repr__(self):
-        # TODO: this is the type of thing that makes the interface way more
-        # explorable, so go ham with making it fancy
         complete = (
             "success"
             if self._completed and not self._exception
@@ -110,10 +118,9 @@ class DerivedServiceResult(ServiceResult[T], Generic[P, T]):
 
     async def compute_result_from_parent(self, parent: P) -> T:
         """More useful function for defining derived computations."""
-        raise NotImplemented
+        raise NotImplementedError
 
 
-# TODO: use protocols to better describe this (if possible)
 class ServiceResultAttr(DerivedServiceResult[P, T]):
     def __init__(self, parent: ServiceResult[P], attr: str):
         super().__init__()
@@ -147,7 +154,6 @@ class ServiceResultApply(DerivedServiceResult[P, T]):
         self.fn = fn
 
     async def compute_result_from_parent(self, parent_result: P) -> T:
-        # what if self.fn is a service call? will this still work?
         return self.fn(parent_result)
 
     def _repr_expression(self):
@@ -156,7 +162,6 @@ class ServiceResultApply(DerivedServiceResult[P, T]):
 
 async def resolve_result(result):
     """Resolve a ServiceResult to a result value."""
-    # if we return a ServiceResult, we want to resolve it to a real value
     while isinstance((result := await result), ServiceResult):
         pass
     return result

@@ -27,13 +27,14 @@ class Args:
     user: User
 
 
-def tabular(l: list[dataclasses.dataclass]):
-    if not l:
+# TODO: flatten nested schemas
+def tabular(rows: list[dataclasses.dataclass]):
+    if not rows:
         return r"\[\]"
-    first = l[0]
+    first = rows[0]
     if isinstance(first, tuple):
         table = Table(*([""] * len(first)), show_header=False, show_edge=False)
-        for row in l:
+        for row in rows:
             table.add_row(*(Pretty(c) for c in row))
         return table
     elif dataclasses.is_dataclass(first):
@@ -42,12 +43,12 @@ def tabular(l: list[dataclasses.dataclass]):
             show_header=True,
             show_edge=False,
         )
-        for row in l:
+        for row in rows:
             table.add_row(*(Pretty(c) for c in dataclasses.astuple(row)))
         return table
     else:
         table = Table(show_header=False, show_edge=False)
-        for row in l:
+        for row in rows:
             table.add_row(Pretty(row))
         return table
 
@@ -58,7 +59,7 @@ class Prompt(Prompt):
     @classmethod
     def repl(cls, user, path):
         user_s = f"[bright_yellow]{user.name}[/]"
-        sys_s = f"[bright_green]@[bright_cyan]sos-prototype"
+        sys_s = "[bright_green]@[bright_cyan]sos-prototype"
         path_s = f"[white]([bright_magenta]{path}[/])"
         return cls.ask(f"{user_s}{sys_s} {path_s} [bright_white]>>> ")
 
@@ -137,7 +138,7 @@ class Shell:
                                 else:
                                     print(repr(result))
                                 break
-            except Exception as e:
+            except Exception:
                 Console().print_exception(show_locals=False)
 
 

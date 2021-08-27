@@ -15,6 +15,8 @@ from sos.execution_context import ExecutionContext, current_execution_context
 #   - if a Service inherits from another Service, its Backend class should also
 #       inherit from that service's Backend class (for subclass checks etc)
 #   - clean up Service documentation
+#   - interface and type versioning
+#   - interface and type serialization
 
 
 class Error(Exception):
@@ -249,6 +251,13 @@ def clientmethod(method):
 
 
 class Service(metaclass=ServiceMeta):
+    # The Service definition class is both an interface/client and the implementation.
+    # When you define a Service class, the metaclass creates the separate
+    # implementations, and this becomes a thin client interface. When yielding
+    # out to the service calls, the kernel code will be able to look at
+    # the ExecutionContext for the yielding task and pass it to the "backend"
+    # implementation. This backend is the one that's actually able to run
+    # "priveleged" code.
     """Service is the core class for implementing OS behaviors, and pretty much anything else.
 
     Subclasses of Service should (for now) have a zero-arg constructor that sets up an instance

@@ -94,7 +94,7 @@ def wrap_kernel_test(func):
                         await finalizer
                     except StopAsyncIteration:
                         pass  # expected
-                    except Exception as e:
+                    except Exception:
                         raise
                     else:
                         raise TypeError("async gen fixture {func} had multiple yields")

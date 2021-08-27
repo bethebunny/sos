@@ -9,7 +9,12 @@ from sos.execution_context import ExecutionContext, current_execution_context
 from sos.service import Service
 
 
+# TODO
+#   - clean up this file and move TODOs here :)
+
+
 T = typing.TypeVar("T")
+
 
 # Files should have a strong record type
 @dataclasses.dataclass
@@ -122,29 +127,10 @@ class FileRecord:
     file: File
 
 
-# TODO: Interface versioning, and in general storing types and their versions in a stable
-#       way is going to be key. However, I'd rather get the system to a place where I can play
-#       with it and understand what "good" looks like before I try to figure out "perfect" :)
-#       So let's start with "definitely bad but easy".
-#         - no versioning at all
-#         - types stored with pickle
 class FilesBackendBase(Files.Backend):
-    # The Service definition class is both an interface/client and the implementation.
-    # When you define a Service class, the metaclass creates the separate
-    # implementations, and this becomes a thin client interface. When yielding
-    # out to the service calls, the kernel code will be able to look at
-    # the ExecutionContext for the yielding task and pass it to the "backend"
-    # implementation. This backend is the one that's actually able to run
-    # "priveleged" code.
-    #
-    # This probably isn't the best way to store state on the backend classes :)
-    # So next I really need to figure out how Services get configured, so eg.
-    # I can have an instance of this in the unit tests that doesn't just overwrite
-    # files created by the shell xDDD
-
     @property
     def _data(self) -> dict[Path, FileRecord]:
-        raise NotImplemented
+        raise NotImplementedError
 
     async def stat(self, path: Path) -> FileMetadata:
         path = resolve_path(current_execution_context(), path)
@@ -164,7 +150,6 @@ class FilesBackendBase(Files.Backend):
         data = self._data
         record = FileRecord(
             metadata=FileMetadata(
-                # Unsure where __orig_class__ comes from, possibly dataclass
                 filetype=file.__orig_class__.__args__[0],
                 size=0,
                 creation_time=time.time(),
@@ -206,7 +191,7 @@ class PickleFilesystem(FilesBackendBase):
                 self._shared_data = pickle.load(data_file)
         except Exception as e:
             print(f"Failed to load pickle file {args.local_path}: {e}")
-            print(f"Resetting data")
+            print("Resetting data")
             self._shared_data = {}
 
     @property
@@ -216,7 +201,7 @@ class PickleFilesystem(FilesBackendBase):
     async def write(self, path: Path, file: File) -> None:
         await super().write(path, file)
         with open(self.args.local_path, "wb") as data_file:
-            pickle.dump(self._shared_data)
+            pickle.dump(self._shared_data, data_file)
 
 
 # TODO: save file metadata map somewhere so everything's not a RawBinaryFile
@@ -246,7 +231,7 @@ class ProxyFilesystem(Files.Backend):
         return RawBinaryFile(real.read_bytes())
 
     async def write(self, path: Path, file: File) -> None:
-        raise NotImplemented
+        raise NotImplementedError
 
     async def list_directory(self, path: Path) -> list[(Path, FileMetadata)]:
         # TODO: we'd like to be able to implement service calls as generators

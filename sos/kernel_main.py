@@ -1,6 +1,5 @@
 import collections
 import dataclasses
-from os import execlp
 import traceback
 from typing import Coroutine, Iterable, NamedTuple
 import weakref

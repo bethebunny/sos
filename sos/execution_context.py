@@ -1,7 +1,6 @@
 import contextlib
 import dataclasses
 from pathlib import Path
-from typing import Optional
 
 
 @dataclasses.dataclass
@@ -12,20 +11,31 @@ class User:
 ROOT = User("root")
 
 
-# The user _should not_ be able to possibly use an execution context
-# that's not a subset of the permissions of their own execution context.
-# Obviously this implementation doesn't do that yet.
-#
-# For the intended api is eg.
-# with current_execution_context().replace(root="/home/stef").active():
-#     files = Files()
-#
-# There's soooo many ergonomic TODO here
-#  - let ExecutionContext be used as a context manager
-#  - don't have to use dataclasses.replace everywhere
-#  - current_execution_context() is really wordy and we use it everywhere
+# TODO:
+#   - think more carefully about user model and what users are/mean
+#   - let ExecutionContext be used as a context manager (rather than .active())
+#   - current_execution_context() is really wordy and we use it everywhere
+#   - try to implement using contextvars instead of a module global
+#       ... or understand why that's not a good idea :)
+
+
 @dataclasses.dataclass(frozen=True)
 class ExecutionContext:
+    """The core ExecutionContext representing the permissions that a given scope
+    of code has. Generally we'd like the security of the kernel design to meet as
+    many of these criteria as possible.
+
+        1 practical: people won't use systems that are cumbersome or have high mental load
+        2 easy: things are more secure when the easiest way to do them is the secure way
+        3 isolation: "unsafe" operations should have as small a surface area as possible
+        4 least privilege: run things in the lowest privilege mode they need
+        5 write up, read down: data can only flow in the direction of higher privilege
+
+    Roughly this is ordered by importance where ideologies conflict. Don't sacrifice
+    practicality for perfection; make something useful and fun, but when compromises are
+    made, keep track of them and aspire to a future system with fewer compromises.
+    """
+
     user: User
     root: Path = Path("/")
     working_directory: Path = Path("/")
@@ -50,7 +60,7 @@ class ExecutionContext:
     def active(self):
         global _EXECUTION_CONTEXT
         old_execution_context = _EXECUTION_CONTEXT
-        if old_execution_context is not self:  # slight optimiation for the common case
+        if old_execution_context is not self:  # slight optimization for the common case
             _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
         try:
             yield
@@ -60,9 +70,6 @@ class ExecutionContext:
 
 _EXECUTION_CONTEXT = ExecutionContext(ROOT)
 
-# WARNING: THINK ABOUT THIS A LOT SOMETIME
-# Potential for security holes here. For instance, if we can pass a callback
-# to a service and get it to execute it, and that callback grabs execution context,
-# we could leak or allow setting an execution context that's not ours.
+
 def current_execution_context():
     return _EXECUTION_CONTEXT

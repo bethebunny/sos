@@ -13,6 +13,7 @@ from sos.services import Services
 
 # TODO:
 #  - move many of these tests to test_service.py or test_services.py
+#  - figure out test_service_call_delayed_execution_doesnt_leak_execution_context
 
 
 class A(Service):
@@ -92,7 +93,7 @@ async def test_service_call_makes_service_call(services):
 async def test_service_calls_can_recursively_make_service_calls():
     # since it's the only backend, None means call itself
     # what we're testing here is that we can make an abitrary number of nested system calls
-    outsource_a_id = await Services().register_backend(
+    await Services().register_backend(
         A,
         OutsourceA,
         OutsourceA.Args(None),
@@ -217,14 +218,10 @@ async def test_service_call_delayed_execution_doesnt_leak_execution_context(serv
     simple, _ = services
     b_only = Services().register_backend(A, BOnly)
 
-    ### Currently can't even apply awaitable fns :)
+    # Currently can't even apply awaitable fns :)
     async def b_inc(x: int) -> int:
         with ecb.active():
             return await A(b_only).inc(x)
 
     with eca.active():
         assert 3 == await A(simple).inc(1).apply(b_inc)
-
-
-# TODO: test awaiting on a `ServiceResultApply` which is running a different service call
-#       which runs in a different ExecutionContext and validate that ECs apply properly.

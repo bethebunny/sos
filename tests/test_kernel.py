@@ -6,8 +6,8 @@ import pytest
 
 from sos import service
 from sos.execution_context import ExecutionContext, User, current_execution_context
-from sos.kernel_main import kernel_main
-from sos.service import Service
+from sos.kernel_main import ServiceHadNoMatchingEndpoint, kernel_main
+from sos.service import Service, ServiceCall
 from sos.services import Services
 
 
@@ -111,9 +111,24 @@ async def test_gather_delayed_execution(services):
     assert 55 == await service.gather(*(map(A(simple).inc, range(10)))).apply(sum)
 
 
-@pytest.mark.kernel
-async def test_scheduled():
-    pass  # TODO
+def test_scheduled():
+    ran = False
+
+    async def run_scheduled():
+        nonlocal ran
+        assert await Services().health_check()
+        ran = True
+
+    async def main():
+        await service.schedule(run_scheduled())
+        # This may fail; we don't make guarantees that it doesn't
+        # run immediately.
+        assert not ran
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(kernel_main(main()))
+
+    assert ran
 
 
 @pytest.mark.kernel
@@ -135,6 +150,19 @@ async def test_yield_non_service_call():
 
     with pytest.raises(TypeError):
         await CustomSystemCall(ScheduleToken())
+
+
+@pytest.mark.kernel
+async def test_access_private_endpoint():
+    class AWithPrivate(A.Backend):
+        async def private(self):
+            return "secret"
+
+    with pytest.raises(AttributeError):
+        await A().private()
+
+    with pytest.raises(ServiceHadNoMatchingEndpoint):
+        await ServiceCall(current_execution_context(), A, None, "private", (), {})
 
 
 @pytest.mark.skip

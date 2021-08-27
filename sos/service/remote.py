@@ -60,7 +60,9 @@ class Remote:
     #       internally calls A.__new__ and afterwards sets up __orig_class__, etc.
     #       That means with normal Generics we don't have access to __orig_class__
     #       until __init__ time.
-    _service_type: Type[Service]
+
+    # This is inherited from {service}.Backend, just marking it here
+    interface: Type[Service]
 
     async def __call_remote(self, endpoint, args, kwargs) -> any:
         print(
@@ -69,14 +71,14 @@ class Remote:
             f"{', '.join(f'{k}={v!r}' for k, v in kwargs.items())})"
         )
         # TODO: make this actually do a remote call :)
-        services = await Services().list_backends(self._service_type)
+        services = await Services().list_backends(self.interface)
         for service_id, backend_type, _ in services:
             if not issubclass(backend_type, Remote):
-                endpoint = getattr(self._service_type(service_id), endpoint)
+                endpoint = getattr(self.interface(service_id), endpoint)
                 return await endpoint(*args, **kwargs)
         else:
             raise RuntimeError(
-                f"No local service backend found to pretend for {self._service_type}"
+                f"No local service backend found to pretend for {self.interface}"
             )
 
     _class_cache: dict[Type[Service] : Type["Remote"]] = {}
@@ -105,5 +107,5 @@ class Remote:
         return type(
             f"Remote[{service_type.__name__}].Backend",
             (cls, service_type.Backend),
-            {"_service_type": service_type, **endpoints},
+            endpoints,
         )

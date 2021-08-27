@@ -24,6 +24,7 @@ from .services.services import TheServicesBackend
 #   - implement pre-emption, allowing on a time or certain events to stop the
 #       current task and move it back to the `ready` state
 #   - can we use contextvars to eliminate the need to pass ExecutionContext everywhere?
+#   - schedule should put the current task ahead of the task it just scheduled in queue
 
 
 class InvalidExecutionContextRequested(Error):

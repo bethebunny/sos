@@ -17,6 +17,9 @@ from sos.services.files import Files
 #       - what if a filesystem wants to log?
 #       - what if we want to log all ServiceCalls from the kernel?
 #   - log formatters for output
+#   - track host, calling executable in log lines
+#   - distributed tracing tokens
+#       - contextvars will be killer for this
 
 
 Timestamp = float

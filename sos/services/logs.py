@@ -67,11 +67,6 @@ class Logs(Service):
             "self" not in frame.f_locals
             or not isinstance(frame.f_locals["self"], ServiceBackendBase)
         ):
-            print(
-                frame.f_code.co_filename,
-                frame.f_code.co_name,
-                frame.f_locals.get("self"),
-            )
             frame = frame.f_back
 
         if frame:
@@ -105,6 +100,7 @@ class StdoutLogs(Logs.Backend):
         print(log)
 
     async def query(self, **query) -> list[LogLine]:
+        # TODO: this is just here for demonstration in shell.py
         await Logs().log(query_args=query)
         return []
 

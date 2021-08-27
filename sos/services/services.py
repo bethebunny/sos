@@ -111,6 +111,7 @@ class TheServicesBackend(Services.Backend):
     def register_backend_instance(
         self, service: type[Service], instance: Service.Backend, service_id: str
     ):
+        instance.service_id = service_id
         for service_implemented in service.__mro__:
             if issubclass(service_implemented, Service):
                 # TODO: what if it's already running?

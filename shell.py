@@ -15,6 +15,7 @@ from sos.kernel_main import kernel_main
 
 from sos.services import Services
 from sos.services.files import Files, ProxyFilesystem
+from sos.services.logs import Logs, StdoutLogs
 
 
 LOCAL_ROOT = Path(".sos-hard-drive")
@@ -80,6 +81,8 @@ class Shell:
             ProxyFilesystem,
             ProxyFilesystem.Args(local_root=LOCAL_ROOT),
         )
+        await Services().register_backend(Logs, StdoutLogs)
+
         while (
             line := Prompt.repl(self.args.user, self.ec.working_directory)
         ) != "exit":

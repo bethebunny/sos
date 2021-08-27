@@ -97,30 +97,22 @@ class Scheduler:
 
     def wait_on_schedule_token(
         self, coro: Coroutine, ec: ExecutionContext, token: ScheduleToken
-    ):
+    ) -> None:
         """Wait on a previously scheduled execution."""
         try:
             waiting_on = self.schedule_tokens[token]
         except KeyError as e:
             self.schedule_now(coro, ec, e, True)
         else:
-            return self.wait_on(coro, ec, waiting_on)
+            self.wait_on(coro, ec, waiting_on)
 
-    def resolve(self, coro: Coroutine, value: any) -> None:
-        """Mark a coroutine as successfully resolved. Move others waiting on it to ready."""
+    def resolve(self, coro: Coroutine, value: any, threw: bool) -> None:
+        """Mark a coroutine as resolved. Move others waiting on it to ready."""
         for waiting, ec in self.waiting.pop(coro, ()):
-            self.schedule_now(waiting, ec, value)
+            self.schedule_now(waiting, ec, value, threw=threw)
 
         # Always store results; it's a weak key dict so if nothing's waiting they'll be GCed later
-        self.scheduled_results[coro] = (value, False)
-
-    def threw(self, coro: Coroutine, exc: Exception) -> None:
-        """Mark a coroutine having resolved with an exception. Move others waiting on it to ready."""
-        for waiting, ec in self.waiting.pop(coro, ()):
-            self.schedule_now(waiting, ec, exc, threw=True)
-
-        # Always store results; it's a weak key dict so if nothing's waiting they'll be GCed later
-        self.scheduled_results[coro] = (exc, True)
+        self.scheduled_results[coro] = (value, threw)
 
     def __iter__(self) -> Iterable[Scheduled]:
         """Loop through the ready scheduled coroutines until their are none.
@@ -239,11 +231,11 @@ class Kernel:
                 else:
                     service_call = coro.send(result)
             except StopIteration as e:
-                scheduler.resolve(coro, e.value)
+                scheduler.resolve(coro, e.value, threw=False)
             except Exception as e:
                 if coro is main:
                     raise e
-                scheduler.threw(coro, e)
+                scheduler.resolve(coro, e, threw=True)
             else:
                 self.schedule_service_call(coro, service_call, ec)
 

@@ -4,7 +4,7 @@ import random
 import re
 from typing import Optional
 
-from sos.service.service import Service, ServiceMeta
+from sos.service.service import Service, ServiceMeta, ServiceNotFound
 
 
 def _load_words(path: str = "/usr/share/dict/words"):
@@ -122,10 +122,11 @@ class TheServicesBackend(Services.Backend):
         impls = self._running.get(service, {})
         if service_id is not None:
             if service_id not in impls:
-                raise RuntimeError(f"no {service} backend running with ID {service_id}")
+                raise ServiceNotFound(
+                    "no {service} backend running with ID {service_id}"
+                )
             return impls[service_id]
         else:
             if not impls:
-                # TODO error types
-                raise RuntimeError(f"no running backend found for {service}")
+                raise ServiceNotFound(f"no running backend found for {service}")
             return next(iter(impls.values()))

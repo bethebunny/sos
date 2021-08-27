@@ -1,7 +1,7 @@
 import asyncio
 import dataclasses
 from pathlib import Path
-from sos.service.service import AwaitScheduled, ScheduleToken
+from sos.service.service import AwaitScheduled, ScheduleToken, ServiceNotFound
 import pytest
 
 from sos import service
@@ -135,6 +135,19 @@ def test_scheduled():
 async def test_scheduled__wait_on_random_token():
     with pytest.raises(KeyError):
         await AwaitScheduled(ScheduleToken())
+
+
+@pytest.mark.kernel
+async def test_call_service__no_backend():
+    with pytest.raises(ServiceNotFound):
+        await A().inc(0)
+
+
+@pytest.mark.kernel
+async def test_call_service__no_backend_with_service_id(services):
+    service_id = "not a service ID!"
+    with pytest.raises(ServiceNotFound):
+        await A(service_id).inc(0)
 
 
 @pytest.mark.kernel

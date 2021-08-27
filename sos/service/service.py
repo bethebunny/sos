@@ -8,13 +8,26 @@ from sos.execution_context import ExecutionContext, current_execution_context
 
 
 # TODO:
-#   - tasks aren't actually scheduled until they're awaited on
 #   - when an exception is thrown, un-awaited tasks leak (should be cancelled)
-#   - if a call exits without awaiting on a task, that task should still complete
-#       - but don't await on it; we _should_ be able to do things like say "log this later"
-#       - probably better to make this explicit, ie. you have to mark anything you're not waiting on
 #   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
 #       good target for making stack traces better / easier to read.
+#   - Errors should be nice, eg. "did you mean...?"
+
+
+class Error(Exception):
+    """Base service call error."""
+
+
+class ServiceNotFound(Error):
+    """Didn't find the service in the services lookup."""
+
+
+class ServiceDidNotStart(Error):
+    """There was a failure starting a backend for the service."""
+
+
+class ServiceHadNoMatchingEndpoint(Error):
+    """The service backend for that service didn't have the requested method endpoint."""
 
 
 async def resolve_args(args, kwargs):

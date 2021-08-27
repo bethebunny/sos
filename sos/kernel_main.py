@@ -8,31 +8,23 @@ import weakref
 from .execution_context import ExecutionContext, current_execution_context
 from .service.service import (
     AwaitScheduled,
+    Error,
     Service,
     ServiceCall,
     Schedule,
     ScheduleToken,
     ServiceCallBase,
+    ServiceHadNoMatchingEndpoint,
 )
 from .services import Services
 from .services.services import TheServicesBackend
 
 
-# TODO: Errors should be nice, eg. "did you mean...?"
-class Error(Exception):
-    """Base service call error."""
-
-
-class ServiceNotFound(Error):
-    """Didn't find the service in the services lookup."""
-
-
-class ServiceDidNotStart(Error):
-    """There was a failure starting a backend for the service."""
-
-
-class ServiceHadNoMatchingEndpoint(Error):
-    """The service backend for that service didn't have the requested method endpoint."""
+# TODO:
+#   - when an exception is thrown, un-awaited tasks leak (should be cancelled)
+#   - implement pre-emption, allowing on a time or certain events to stop the
+#       current task and move it back to the `ready` state
+#   - can we use contextvars to eliminate the need to pass ExecutionContext everywhere?
 
 
 class InvalidExecutionContextRequested(Error):
@@ -70,9 +62,6 @@ class Scheduler:
     # `ready` contains ready tasks in order, while `waiting` tracks the dependency graph
     # of tasks. When a task completes via `resolve` or `threw`, mark its dependent tasks
     # as ready.
-    # TODO: implement pre-emption, allowing on a time or certain events to stop the
-    #       current task and move it back to the `ready` state
-    # TODO: can we use contextvars to eliminate the need to pass ExecutionContext everywhere?
 
     def __init__(self):
         # Queues managing ready and waiting tasks

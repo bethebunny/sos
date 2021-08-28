@@ -1,2 +1,2 @@
 from .service_result import ServiceResult
-from .service import Service, ServiceCall, clientmethod, gather, schedule
+from .service import ScheduleToken, Service, ServiceCall, clientmethod, gather, schedule

@@ -14,6 +14,7 @@ from .service.service import (
     ScheduleToken,
     ServiceCallBase,
     ServiceHadNoMatchingEndpoint,
+    current_call,
 )
 from .services import Services
 from .services.services import TheServicesBackend
@@ -166,6 +167,7 @@ async def handle_service_call(
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
 
     backend = services.get_backend(service_call.service, service_call.service_id)
+    current_call.set((backend, service_call.endpoint))
     endpoint = getattr(backend, service_call.endpoint)
     with requested_ec.active():
         return await endpoint(*service_call.args, **service_call.kwargs)

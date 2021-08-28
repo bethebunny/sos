@@ -1,3 +1,4 @@
+import contextvars
 import dataclasses
 import functools
 import inspect
@@ -17,6 +18,9 @@ from sos.execution_context import ExecutionContext, current_execution_context
 #   - clean up Service documentation
 #   - interface and type versioning
 #   - interface and type serialization
+
+
+current_call = contextvars.ContextVar("current_call")
 
 
 class Error(Exception):
@@ -234,7 +238,9 @@ class ServiceBackendBase:
 
     @dataclasses.dataclass
     class Args:
-        pass
+        def __repr__(self):
+            # Hack, Rich doesn't render dataclasses with no attributes properly
+            return f"{type(self).__name__}(None)"
 
     def __init__(self, args: Optional[Args] = None):
         self.args = args or self.Args()

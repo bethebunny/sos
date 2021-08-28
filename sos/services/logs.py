@@ -5,8 +5,8 @@ import time
 from typing import Optional
 
 from sos.execution_context import User, current_execution_context
-from sos.service import Service, clientmethod
-from sos.service.service import ServiceBackendBase
+from sos.service import ScheduleToken, Service, clientmethod, schedule
+from sos.service import service
 from sos.services.files import Files
 
 
@@ -47,44 +47,56 @@ class Logs(Service):
         pass
 
     @clientmethod
-    async def log(self, **data: any):
+    async def log(self, /, _currentframe=None, **data: any) -> ScheduleToken:
         """Log a structured log record, automatically tracking many details; see LogLine.
         Any keyword arguments passed to the log line will be stored as a structured log line,
         queryable, searchable, etc. To replicate simple application logging, you can eg.
 
         >>> await Logs().log(level="info", message="Something happened!")
+        >>> await log(level="info", message="Something happened!")
+
+        If you want to write an API that wraps logs calls, use `_currentframe` to help the
+        logging introspection log the correct file and lineno values.
+
+        For instance, here is how you might implement an interface closer to logger/log4j:
+
+        >>> def info(format, **format_params):
+        ...     if current_level.get() < Level.INFO:
+        ...         return async_pass
+        ...     message = format.format(**format_params)
+        ...     return log(level="info", message=message, _currentframe=inspect.currentframe())
+        >>> await info("Some stuff: {thing}, {other}", thing=5, other=10)
         """
         # Introspect the stack and calling environment to populate all of the junk in LogLine
         ec = current_execution_context()
-        ts = time.time()
-        calling_frame = inspect.currentframe().f_back
-        filename = calling_frame.f_code.co_filename
-        lineno = calling_frame.f_lineno
+        calling_frame = (_currentframe or inspect.currentframe()).f_back
+
+        log_line = LogLine(
+            user=ec.user,
+            path=ec.full_path,
+            ts=time.time(),
+            file=calling_frame.f_code.co_filename,
+            lineno=calling_frame.f_lineno,
+            data=data,
+        )
 
         # Find calling service if any
-        frame = calling_frame
-        while frame and (
-            "self" not in frame.f_locals
-            or not isinstance(frame.f_locals["self"], ServiceBackendBase)
-        ):
-            frame = frame.f_back
-
-        if frame:
-            backend_instance = frame.f_locals["self"]
-            service_info = dict(
+        backend_instance, endpoint = service.current_call.get((None, None))
+        if backend_instance:
+            log_line = dataclasses.replace(
+                log_line,
                 service=backend_instance.interface,
                 backend=type(backend_instance),
                 service_id=backend_instance.service_id,
-                endpoint=frame.f_code.co_name,
+                endpoint=endpoint,
             )
-        else:
-            service_info = {}
 
-        await self.write_log(
-            LogLine(
-                ec.user, ec.full_path, ts, filename, lineno, **service_info, data=data
-            )
-        )
+        return await schedule(self.write_log(log_line))
+
+
+async def log(**data: any) -> ScheduleToken:
+    """Sugar for Logs().log(**data)."""
+    return await Logs().log(_currentframe=inspect.currentframe(), **data)
 
 
 class DevNullLogs(Logs.Backend):
@@ -101,7 +113,7 @@ class StdoutLogs(Logs.Backend):
 
     async def query(self, **query) -> list[LogLine]:
         # TODO: this is just here for demonstration in shell.py
-        await Logs().log(query_args=query)
+        await log(query_args=query)
         return []
 
 

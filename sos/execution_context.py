@@ -1,3 +1,4 @@
+import contextvars
 import contextlib
 import dataclasses
 from pathlib import Path
@@ -58,18 +59,16 @@ class ExecutionContext:
 
     @contextlib.contextmanager
     def active(self):
-        global _EXECUTION_CONTEXT
-        old_execution_context = _EXECUTION_CONTEXT
-        if old_execution_context is not self:  # slight optimization for the common case
-            _EXECUTION_CONTEXT = self.chroot() if self.sandbox else self
+        token = _EXECUTION_CONTEXT.set(self.chroot() if self.sandbox else self)
         try:
             yield
         finally:
-            _EXECUTION_CONTEXT = old_execution_context
+            _EXECUTION_CONTEXT.reset(token)
 
 
-_EXECUTION_CONTEXT = ExecutionContext(ROOT)
+_EXECUTION_CONTEXT = contextvars.ContextVar(
+    "current_execution_context", default=ExecutionContext(ROOT)
+)
 
 
-def current_execution_context():
-    return _EXECUTION_CONTEXT
+current_execution_context = _EXECUTION_CONTEXT.get

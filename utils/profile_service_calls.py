@@ -4,7 +4,6 @@ Run with
 """
 import asyncio
 import dataclasses
-from sos.execution_context import current_execution_context
 
 from sos.service import Service
 from sos.services import Services
@@ -42,7 +41,7 @@ class OutsourceA(A.Backend):
 
 
 async def main():
-    outsource_a_id = await Services().register_backend(
+    await Services().register_backend(
         A,
         OutsourceA,
         OutsourceA.Args(None),

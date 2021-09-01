@@ -180,6 +180,7 @@ class Shell:
                     async def run_remote():
                         import dataclasses
                         from sos.services.logs import log
+                        from sos.service import Service
 
                         class Math(Service):
                             async def inc(self, x: int) -> int:

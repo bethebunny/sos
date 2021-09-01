@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from sos.kernel_main import kernel_main
-from sos.service import Service
 from sos.services import Services
 from sos.services.files import Files, ProxyFilesystem
 from sos.services.logs import Logs, StdoutLogs

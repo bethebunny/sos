@@ -7,6 +7,13 @@ from typing import Optional
 from sos.service.service import Service, ServiceMeta, ServiceNotFound
 
 
+# TODO:
+#   - API for removing services
+#   - Interface for services complaining / saying they're unhealthy / notifying of shutdown
+#   - better docs en backend
+#   - premade words list
+
+
 def _load_words(path: str = "/usr/share/dict/words"):
     valid_word_re = re.compile(r"^[a-z]{4,8}$")
     with open(path) as words:
@@ -94,7 +101,9 @@ class TheServicesBackend(Services.Backend):
     ) -> str:
         service_id = service_id if service_id is not None else semantic_hash(2)
         args = args if args is not None else backend.Args()
-        self.register_backend_instance(service, backend(args), service_id)
+        backend_instance = backend(args)
+        await backend_instance.__asyncinit__()
+        self.register_backend_instance(service, backend_instance, service_id)
         return service_id
 
     async def list_services(self) -> list[Service]:

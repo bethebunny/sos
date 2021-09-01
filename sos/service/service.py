@@ -1,3 +1,4 @@
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -18,9 +19,23 @@ from sos.execution_context import ExecutionContext, current_execution_context
 #   - clean up Service documentation
 #   - interface and type versioning
 #   - interface and type serialization
+#   - make backend __asyncinit__ log
+#   - clean up current_call API
 
 
-current_call = contextvars.ContextVar("current_call")
+_current_call = contextvars.ContextVar("current_call")
+
+
+@contextlib.contextmanager
+def current_call(backend_instance, endpoint_name):
+    token = _current_call.set((backend_instance, endpoint_name))
+    try:
+        yield
+    finally:
+        _current_call.reset(token)
+
+
+current_call.get = _current_call.get
 
 
 class Error(Exception):
@@ -244,6 +259,11 @@ class ServiceBackendBase:
 
     def __init__(self, args: Optional[Args] = None):
         self.args = args or self.Args()
+
+    async def __asyncinit__(self):
+        """An async method called after init on all registered backend instances.
+        Allows service backend initialization to make service calls.
+        """
 
     async def health_check(self) -> bool:
         return True

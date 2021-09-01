@@ -83,6 +83,8 @@ class ServiceResult(Awaitable[T]):
 
     def _repr_expression(self):
         return_type = self.__orig_class__.__args__[0]
+        if return_type is None:
+            return repr(None)
         return f"{return_type.__module__}.{return_type.__qualname__}"
 
     def __repr__(self):

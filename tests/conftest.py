@@ -5,9 +5,9 @@ import inspect
 import pytest
 
 from sos.kernel_main import kernel_main
-import sos.kernel_main
+import sos.scheduler
 
-sos.kernel_main.RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS = True
+sos.scheduler.RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS = True
 
 # Set up hooks for vscode debugger integration
 # see https://stackoverflow.com/questions/62419998/how-can-i-get-pytest-to-not-catch-exceptions/62563106#62563106

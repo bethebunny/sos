@@ -4,6 +4,8 @@ from pathlib import Path
 import time
 from typing import Optional
 
+from rich import print
+
 from sos.execution_context import User, current_execution_context
 from sos.service import ScheduleToken, Service, clientmethod, schedule
 from sos.service import service
@@ -20,6 +22,8 @@ from sos.services.files import Files
 #   - track host, calling executable in log lines
 #   - distributed tracing tokens
 #       - contextvars will be killer for this
+#   - better log tracing for scheduled tasks
+#   - better default formatter
 
 
 Timestamp = float
@@ -32,7 +36,7 @@ class LogLine:
     ts: Timestamp
     file: str
     lineno: int
-    service: Optional[type[Service]] = None
+    service: Optional[type[Service]] = type(None)
     backend: Optional[type[Service.Backend]] = None
     service_id: Optional[str] = None
     endpoint: Optional[str] = None
@@ -94,9 +98,17 @@ class Logs(Service):
         return await schedule(self.write_log(log_line))
 
 
-async def log(**data: any) -> ScheduleToken:
+def log(**data: any) -> ScheduleToken:
     """Sugar for Logs().log(**data)."""
-    return await Logs().log(_currentframe=inspect.currentframe(), **data)
+    return Logs().log(_currentframe=inspect.currentframe(), **data)
+
+
+@dataclasses.dataclass
+class Formatter:
+    format: str
+
+    def format_line(self, line: LogLine) -> str:
+        return self.format.format(**dataclasses.asdict(line))
 
 
 class DevNullLogs(Logs.Backend):
@@ -108,8 +120,14 @@ class DevNullLogs(Logs.Backend):
 
 
 class StdoutLogs(Logs.Backend):
+    @dataclasses.dataclass
+    class Args:
+        formatter: Formatter = Formatter(
+            "{ts} {file}:{lineno} {user[name]}@[{service.__name__}({service_id}).{endpoint}] -- {data}"
+        )
+
     async def write_log(self, log: LogLine) -> None:
-        print(log)
+        print(self.args.formatter.format_line(log))
 
     async def query(self, **query) -> list[LogLine]:
         # TODO: this is just here for demonstration in shell.py

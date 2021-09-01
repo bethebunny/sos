@@ -5,6 +5,9 @@ import inspect
 import pytest
 
 from sos.kernel_main import kernel_main
+import sos.kernel_main
+
+sos.kernel_main.RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS = True
 
 # Set up hooks for vscode debugger integration
 # see https://stackoverflow.com/questions/62419998/how-can-i-get-pytest-to-not-catch-exceptions/62563106#62563106
@@ -66,8 +69,6 @@ def wrap_kernel_test(func):
 
     @functools.wraps(func)
     def inner(**kwargs):
-        loop = asyncio.get_event_loop()
-
         async def run_fixtures_and_test():
             normal_kwargs = dict_filter(kwargs, lambda v: not is_async(v))
             async_fixture_kwargs = dict_filter(kwargs, inspect.iscoroutine)
@@ -99,16 +100,6 @@ def wrap_kernel_test(func):
                     else:
                         raise TypeError("async gen fixture {func} had multiple yields")
 
-        coro = kernel_main(run_fixtures_and_test())
-        task = asyncio.ensure_future(coro, loop=loop)
-        try:
-            loop.run_until_complete(task)
-        except BaseException:
-            # run_until_complete doesn't get the result from exceptions
-            # that are not subclasses of `Exception`. Consume all
-            # exceptions to prevent asyncio's warning from logging.
-            if task.done() and not task.cancelled():
-                task.exception()
-            raise
+        kernel_main(run_fixtures_and_test())
 
     return inner

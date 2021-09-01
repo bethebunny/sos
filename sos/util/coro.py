@@ -35,3 +35,11 @@ class AsyncPass:
 
 
 async_pass = AsyncPass()
+
+
+class AsyncYield:
+    def __await__(self):
+        return (yield None)
+
+
+async_yield = AsyncYield()

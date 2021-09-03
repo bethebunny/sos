@@ -13,7 +13,6 @@ from sos.execution_context import ExecutionContext, current_execution_context
 #   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
 #       good target for making stack traces better / easier to read.
 #   - Errors should be nice, eg. "did you mean...?"
-#   - .Backend class names are confusingly not including the .Backend in the repr.
 #   - if a Service inherits from another Service, its Backend class should also
 #       inherit from that service's Backend class (for subclass checks etc)
 #   - clean up Service documentation
@@ -237,10 +236,15 @@ class ServiceMeta(type):
         for attr in endpoints:
             setattr(client_type, attr, wrap_service_call(client_type, namespace[attr]))
 
-        backend_base = type(f"{name}.Backend", (ServiceBackendBase,), namespace)
+        backend_bases = (
+            *(base.Backend for base in bases if hasattr(bases, "Backend")),
+            ServiceBackendBase,
+        )
 
-        backend_base.interface = client_type
-        client_type.Backend = backend_base
+        backend_type = type(f"{name}.Backend", backend_bases, {})
+
+        backend_type.interface = client_type
+        client_type.Backend = backend_type
         client_type.__endpoints__ = endpoints
 
         cls.SERVICES.append(client_type)
@@ -265,8 +269,19 @@ class ServiceBackendBase:
         Allows service backend initialization to make service calls.
         """
 
+    async def shutdown(self):
+        """Called by the kernel to shut down services. Override with any cleanup
+        your service needs to do."""
+
     async def health_check(self) -> bool:
         return True
+
+    async def endpoints(self) -> dict[str, inspect.Signature]:
+        """Return"""
+        return {
+            endpoint: inspect.signature(getattr(self, endpoint))
+            for endpoint in self.interface.__endpoints__
+        }
 
 
 def clientmethod(method):
@@ -332,3 +347,6 @@ class Service(metaclass=ServiceMeta):
 
     async def health_check(self) -> bool:
         """Basic service instance health check."""
+
+    async def endpoints(self) -> dict[str, inspect.Signature]:
+        """Service endpoint discovery."""

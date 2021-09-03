@@ -1,85 +1,119 @@
+import asyncio
 import dataclasses
 import functools
-from typing import Optional, Type, TypeVar
+from typing import Optional, Tuple, Type, TypeVar
+import uuid
 
-from . import Service
-from sos.services import Services
+import dill
+
+from sos.execution_context import ExecutionContext, current_execution_context
+from . import Service, ServiceCall
+from sos.services.authentication import Authentication
 
 S = TypeVar("S", bound=Service)
 
+# TODO
+#   - real authentication
+#   - shared session tokens across networks
+#       or otherwise locally-verifiable session tokens from a central auth service
+#   - session tokens should not be reused with a different execution context
+#   - get time travel / batch queries working for remote services
 
-# We're kindof prototyping a Service decorator here
-# so it makes sense that this will be a bit wonky at first :)
-# Kindof what we want is a macro or cutpoint that lets us get
-#   1. Type[Service]
-#   2. endpoint
-#   3. *args and **kwargs
-# and then can wrap the call in some logic before it's executed.
-# There _might_ be two different kinds of decorators; for instance
-# I was mainly imagining "backend" decorators ie. ones that would just
-# be normal python function wrappers over a real backend implementation
-# but for instance Remote is more of a "backend" implementation itself
-# that doesn't care about any particular backend details, but wants
-# to defer to any backend implementation it finds with the remote
-# specification. It's possible this is unique, ie. there's no other
-# Remote-type things we want to do, and all others are "normal"
-# backend-style decorators.
-# If we decide we want more things like this we can generalize, but
-# for now all the complexity is contained here.
+
+@dataclasses.dataclass(frozen=True, unsafe_hash=True)
+class RemoteToken:
+    """Base class for tokens from other kernels."""
+
+    token: uuid.uuid4 = dataclasses.field(default_factory=uuid.uuid4)
+
+
+class RemoteScheduleToken(RemoteToken):
+    """A token representing a ScheduleToken on a remote kernel."""
+
+
+class LoginToken(RemoteToken):
+    """Login information for authentication. Stub for now."""
+
+
+class SessionToken(RemoteToken):
+    """A session token which is returned by authentication for reuse."""
+
+
+@dataclasses.dataclass
+class Session:
+    execution_context: ExecutionContext
+
+
+class Error(Exception):
+    """Base error class for remote service access."""
+
+
+class AuthenticationFailed(Error):
+    """Attempted Authentication.authenticate but failed."""
+
+
+class NoActiveSession(Error):
+    """Exception indicating that the user tried to make a non-authentication
+    service call without providing a valid authenticated session token."""
+
+
+RemoteSpec = Tuple[str, int]
 
 
 class Remote:
-    """A backend type decorator that allows creating Remote implementations of services.
+    """A backend type factory that allows creating Remote implementations of services.
 
     For instance,
 
-    >>> await Services().register_backend(Files, Remote[Files], Remote.Args(ip_address))
+    >>> await Services().register_backend(Files, Remote[Files], Remote.Args((host, port)))
     >>> await Files().list_directory()
 
-    will let you use a `Files` service running at `ip_address`!
+    will let you use a `Files` service running at `host`!
 
-    For now it's not actually running remotely; mainly what's implemented is the Service wrapper
-    paradigm. Instead it just looks for any other locally running backend and uses that :)
+    Currently ServiceCalls are serialized with dill, and passed to a remote kernel running
+    a RemoteHostBackend.
 
-    In order to actually get this _fully_ working we need to figure out
-        - How do we serialize types / ServiceCalls? (probably dill for now)
-        - How do we allow exposing services to be registered for external use?
-        - Some kind of scheduling to allow the remote to actually listen and respond to service calls :)
-            Ideally this will not be _too_ different from how the kernel schedules calls anyway.
-        - How do we package and evaluate a chain of service calls intended for the same service?
+    There's currently no way to list available services on a remote without connecting to it,
+    and time travel isn't implemented for remote calls; each remote call executes eagerly.
     """
 
     @dataclasses.dataclass
     class Args:
-        remote_id: str
+        remote_id: RemoteSpec
         remote_service_id: Optional[str] = None
 
-    # TODO: probably making this use Generic smartly so I can reuse those tools
-    #       Generic uses __class_getitem__ and __init_subclass__ so that A() uses
-    #       A.__new__ only, whereas A[B]() is actually _GenericAlias.__call__, which
-    #       internally calls A.__new__ and afterwards sets up __orig_class__, etc.
-    #       That means with normal Generics we don't have access to __orig_class__
-    #       until __init__ time.
+    # TODO: this is insufficient because a session should only be valid for a given ExecutionContext
+    # TODO: services on the same network should be able to use one session to communicate with
+    #       any other service
+    _sessions: dict[RemoteSpec, SessionToken] = {}
 
-    # This is inherited from {service}.Backend, just marking it here
-    interface: Type[Service]
-
-    async def __call_remote(self, endpoint, args, kwargs) -> any:
-        print(
-            f"Calling remote {self.args.remote_id} service {self.args.remote_service_id} "
-            f" endpoint {endpoint}({', '.join(map(repr, args))}{', ' if kwargs else ''}"
-            f"{', '.join(f'{k}={v!r}' for k, v in kwargs.items())})"
-        )
-        # TODO: make this actually do a remote call :)
-        services = await Services().list_backends(self.interface)
-        for service_id, backend_type, _ in services:
-            if not issubclass(backend_type, Remote):
-                endpoint = getattr(self.interface(service_id), endpoint)
-                return await endpoint(*args, **kwargs)
+    async def __call_remote(self, service_call) -> any:
+        session_token = self._sessions.get(self.args.remote_id)
+        if not session_token and service_call.service is not Authentication:
+            session_token = await self.create_session()
+        reader, writer = await asyncio.open_connection(*self.args.remote_id)
+        writer.write(dill.dumps((session_token, service_call)))
+        writer.write_eof()
+        try:
+            response = dill.loads(await reader.read())
+        except NoActiveSession:
+            print("Session invalid, attempting to create new session")
+            if await self.create_session():
+                print("Retrying")
+                return await self.__call_remote(service_call)
+            else:
+                raise RuntimeError("Got back empty session token from remote auth")
         else:
-            raise RuntimeError(
-                f"No local service backend found to pretend for {self.interface}"
-            )
+            if isinstance(response, Exception):
+                raise response
+            else:
+                return response
+
+    async def create_session(self):
+        spec = self.args.remote_id
+        remote = Remote[Authentication](self.Args(spec))
+        token = self._sessions[spec] = await remote.authenticate(None)
+        return token
 
     _class_cache: dict[Type[Service], Type["Remote"]] = {}
 
@@ -96,7 +130,15 @@ class Remote:
         def make_endpoint(endpoint):
             @functools.wraps(getattr(service_type, endpoint))
             async def remote_endpoint(self, *args, **kwargs):
-                return await self.__call_remote(endpoint, args, kwargs)
+                service_call = ServiceCall(
+                    current_execution_context(),
+                    service_type,
+                    self.args.remote_service_id,
+                    endpoint,
+                    args,
+                    kwargs,
+                )
+                return await self.__call_remote(service_call)
 
             return remote_endpoint
 

@@ -12,6 +12,7 @@ from sos.services.logs import log
 # TODO:
 #   - clean up code
 #   - clean up documentation
+#   - simplify this now that RemoteHostBackend has mostly replaced it
 
 # The current Dockerfile is really not the normal Docker operating style.
 # It's not an unreasonable way to run the kernel as a _single service_, but

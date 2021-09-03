@@ -1,28 +1,31 @@
 from pathlib import Path
+from sos.service.service import Service
 
 from sos.kernel_main import kernel_main
 from sos.services import Services
+from sos.services.authentication import Authentication, OpenSeason
 from sos.services.files import Files, ProxyFilesystem
 from sos.services.logs import Logs, StdoutLogs
-from sos.services.shell import Shell, SimpleShellBackend
+from sos.services.remote_host import RemoteHostBackend
 
 LOCAL_ROOT = Path(".sos-hard-drive")
 
 
-async def run_shell():
-    # TODO: we need a cleaner way to exit. We should be able to
-    #       shut down the services, or call shutdown to shut down
-    #       all services.
+# A demo kernel that we can connect to and execute remote kernel calls against
+
+
+async def run_remote():
     await Services().register_backend(Logs, StdoutLogs)
     await Services().register_backend(
         Files,
         ProxyFilesystem,
         ProxyFilesystem.Args(local_root=LOCAL_ROOT),
     )
+    await Services().register_backend(Authentication, OpenSeason)
     await Services().register_backend(
-        Shell, SimpleShellBackend, SimpleShellBackend.Args(2222)
+        Service, RemoteHostBackend, RemoteHostBackend.Args(port=2222)
     )
 
 
 if __name__ == "__main__":
-    kernel_main(run_shell())
+    kernel_main(run_remote())

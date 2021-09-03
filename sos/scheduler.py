@@ -13,6 +13,9 @@ from .service.service import (
 from .util.coro import async_yield
 
 
+# TODO: don't busyloop when there's nothing to do :P
+
+
 # use a namedtuple here because we want to unpack them in kernel_main
 class Scheduled(NamedTuple):
     coro: Coroutine
@@ -47,25 +50,20 @@ class RaisedResult:
             self.scheduler.scheduled_raised_exceptions.remove(self)
         return self._exception
 
-    def __del__(self):
+    def verify_waited_on(self):
         if not self.waited_on:
             if RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS:
                 raise self._exception
             print("Scheduled coroutine threw exception never surfaced")
             exc = self._exception
             traceback.print_exception(type(exc), exc, exc.__traceback__)
+            self.waited_on = True
+
+    def __del__(self):
+        self.verify_waited_on()
 
     def __hash__(self):
         return id(self)
-
-
-def ascoro(fn):
-    @functools.wraps(fn)
-    async def coro(*args, **kwargs):
-        await async_yield
-        return fn(*args, **kwargs)
-
-    return coro
 
 
 class ScheduledFuture(asyncio.Future):
@@ -78,16 +76,18 @@ class ScheduledFuture(asyncio.Future):
         super().__init__()
 
     def add_done_callback(self, fn) -> None:
-        coro = ascoro(fn)(self)
-        coro.send(None)
-        self.scheduler.wait_on_schedule_token(
-            coro, current_execution_context(), self.token
-        )
+        @functools.wraps(fn)
+        async def callback():
+            return fn(self)
+
+        ec = current_execution_context()
+        self.scheduler.wait_on_schedule_token(callback(), ec, self.token)
 
     async def run_and_resolve(self):
+        # must return None because the output is passed to .send on fresh coroutines
         try:
             self.set_result(await self.coro)
-        except Exception as e:
+        except BaseException as e:
             self.set_exception(e)
 
     def __await__(self):
@@ -199,8 +199,12 @@ class Scheduler:
         self.waiting_futures.add(future)
 
     def resolve_asyncio_future(self, f: asyncio.Future):
-        self.resolve(f, f.exception() or f.result(), bool(f.exception()))
-        self.waiting_futures.remove(f)
+        try:
+            self.resolve(f, f.exception() or f.result(), bool(f.exception()))
+        except asyncio.CancelledError as ce:
+            self.resolve(f, ce, True)
+        finally:
+            self.waiting_futures.remove(f)
 
     def run_asyncio_loop_once(self):
         # The loop won't "run" if there's already one "running", but eg. asyncio.create_task
@@ -234,4 +238,4 @@ class Scheduler:
             asyncio.events._set_running_loop(None)
             asyncio.set_event_loop(None)
             for exception in self.scheduled_raised_exceptions:
-                exception.__del__()
+                exception.verify_waited_on()

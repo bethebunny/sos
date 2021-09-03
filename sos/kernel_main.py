@@ -25,6 +25,8 @@ from .services.services import TheServicesBackend
 #   - schedule should put the current task ahead of the task it just scheduled in queue
 #   - log in RaisedResult.__del__
 #   - what happens if a scheduled asyncio.Future raises?
+#   - make a mechanism to .close() all running stuff
+#   - track services which schedule coroutines that don't shut down gracefully
 
 
 class InvalidExecutionContextRequested(Error):
@@ -147,7 +149,7 @@ class Kernel:
                     service_call = coro.send(result)
             except StopIteration as e:
                 self.scheduler.resolve(coro, e.value, threw=False)
-            except Exception as e:
+            except BaseException as e:
                 if coro is main:
                     raise e
                 self.scheduler.resolve(coro, e, threw=True)

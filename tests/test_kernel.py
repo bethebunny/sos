@@ -19,6 +19,10 @@ from sos.util.coro import async_yield
 #  - figure out test_service_call_delayed_execution_doesnt_leak_execution_context
 
 
+class CustomError(Exception):
+    pass
+
+
 class A(Service):
     async def inc(self, x: int) -> int:
         pass
@@ -63,16 +67,47 @@ async def services():
 def test_kernel_tests_execute():
     # Normally doesn't return anything; verify that an exception
     # will propogate up above the kernel
-
-    class CustomError(Exception):
-        pass
-
     async def main():
         await async_yield
         raise CustomError
 
     with pytest.raises(CustomError):
         kernel_main(main())
+
+
+@pytest.mark.skip
+def test_kernel_tests_catch_raised_scheduled_exceptions():
+    # Verify that in the test environment, a scheduled task throwing an exception will raise
+    # This currently causes weird interactions with the test environment where
+    # the deleter gets called during garbage collection at random points during other tests :P
+
+    async def scheduled():
+        await async_yield
+        raise CustomError
+
+    async def main():
+        await service.schedule(scheduled())
+
+    with pytest.raises(CustomError):
+        kernel_main(main())
+
+
+def test_kernel_outside_tests_dont_raise_scheduled_exceptions():
+    import sos.scheduler
+
+    try:
+        sos.scheduler.RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS = False
+
+        async def scheduled():
+            await async_yield
+            raise CustomError
+
+        async def main():
+            await service.schedule(scheduled())
+
+        kernel_main(main())
+    finally:
+        sos.scheduler.RAISE_UNAWAITED_SCHEDULED_EXCEPTIONS = True
 
 
 @pytest.mark.kernel
@@ -254,9 +289,42 @@ async def test_asyncio__create_task_can_schedule_callbacks():
 
     await future
     assert ran
-    # TODO: this test passed so many times while internally throwing exceptions.
-    #       we really need to make tests fail if they raise exceptions that get
-    #       eaten.
+    async with callback_lock:
+        assert callback_ran
+
+
+@pytest.mark.kernel
+async def test_asyncio__create_task_callback_on_raising_coro():
+    lock = asyncio.Lock()
+    callback_lock = asyncio.Lock()
+
+    ran = False
+    callback_ran = False
+
+    async def coro():
+        nonlocal ran
+        async with lock:
+            ran = True
+        raise CustomError()
+
+    def callback(fut):
+        try:
+            nonlocal callback_ran
+            callback_ran = True
+            assert ran
+            with pytest.raises(CustomError):
+                assert fut.result()
+        finally:
+            callback_lock.release()
+
+    async with lock:
+        future = asyncio.get_running_loop().create_task(coro())
+        assert not ran
+        await callback_lock.acquire()
+        future.add_done_callback(callback)
+
+    await future
+    assert ran
     async with callback_lock:
         assert callback_ran
 

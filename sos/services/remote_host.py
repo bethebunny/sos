@@ -32,7 +32,8 @@ def is_auth(service_call: ServiceCall) -> bool:
 class RemoteHostBackend(Service.Backend):
     @dataclasses.dataclass
     class Args:
-        port: 2222
+        host: str = "localhost"
+        port: int = 2222
 
     _healthy: bool = False
 
@@ -43,11 +44,13 @@ class RemoteHostBackend(Service.Backend):
 
     async def __asyncinit__(self):
         server = await asyncio.start_server(
-            self.handle_connection, "localhost", self.args.port
+            self.handle_connection, self.args.host, self.args.port
         )
         addr = server.sockets[0].getsockname()
         await log(serving_on=addr)
         self._server = server
+        await server.__aenter__()
+        self._healthy = True
         await schedule(self.serve(server))
 
     # TODO: if serve fails we should raise a bigger stink and at the very least unregister
@@ -57,16 +60,15 @@ class RemoteHostBackend(Service.Backend):
 
     async def serve(self, server):
         try:
-            async with server:
-                self._healthy = True
-                await server.serve_forever()
+            await server.serve_forever()
         except asyncio.CancelledError:
             pass
         finally:
             self._healthy = False
+            await server.__aexit__()
 
     async def shutdown(self):
-        log()
+        await log()
         self._server.close()
 
     async def health_check(self):

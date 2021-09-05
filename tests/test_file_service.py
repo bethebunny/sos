@@ -39,7 +39,7 @@ async def test_getattr_lazy_service_results(files):
 
     # here we're exercising delayed execution of arguments, note no await on read
     path_to_write = files.read(pointer_path).value
-    await files.write(path_to_write, File[str]("we did it!"))
+    await path_to_write.apply(lambda path: files.write(path, File[str]("we did it!")))
     result = await files.read(path).value
     assert result == "we did it!"
 
@@ -58,7 +58,9 @@ async def test_apply_lazy_service_results(files):
     # note that `path_to_write` points to a string, so we .apply on it to
     # change the promise type into a `Path`. Again this would work more easily
     # in Scala because we could type these operations better.
-    await files.write(path_to_write.apply(Path), File[str]("we did it!"))
+    await path_to_write.apply(
+        lambda path: files.write(Path(path), File[str]("we did it!"))
+    )
     result = await files.read(path).value
     assert result == "we did it!"
 

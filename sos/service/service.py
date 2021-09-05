@@ -3,23 +3,21 @@ import contextvars
 import dataclasses
 import functools
 import inspect
-from typing import Awaitable, Callable, Generic, Optional, Tuple, TypeVar
+from typing import Awaitable, Callable, Optional, TypeVar
 
-from .service_result import ServiceResult, ServiceResultImpl, resolve_result
-from sos.execution_context import ExecutionContext, current_execution_context
+from ..execution_context import current_execution_context
+from .service_call import ServiceCall
 
 
 # TODO:
-#   - a lot of the stack is in the machinery around ServiceResult computation and resolution.
-#       good target for making stack traces better / easier to read.
 #   - Errors should be nice, eg. "did you mean...?"
-#   - if a Service inherits from another Service, its Backend class should also
-#       inherit from that service's Backend class (for subclass checks etc)
 #   - clean up Service documentation
 #   - interface and type versioning
 #   - interface and type serialization
 #   - make backend __asyncinit__ log
 #   - clean up current_call API
+
+T = TypeVar("T")
 
 
 _current_call = contextvars.ContextVar("current_call")
@@ -53,151 +51,10 @@ class ServiceHadNoMatchingEndpoint(Error):
     """The service backend for that service didn't have the requested method endpoint."""
 
 
-async def resolve_args(args, kwargs):
-    """Replace any ServiceResults in args and kwargs with resolved values.
-    This lets us move from "maybe there's some promises mixed in" ServiceResult land
-    to "all values are now real and we can do whatever normal computation we want".
-    """
-    return (
-        # In theory this should be a `tuple`, but we're splatting it anyway,
-        # and list comprehensions are supported via https://www.python.org/dev/peps/pep-0530/
-        # https://bugs.python.org/issue32113 claims that list comprehensions and
-        # generator comprehensions are fundamentally different in this way; I disagree,
-        # and I haven't figured out how you'd actually make the tuple() example work
-        # without allocating the list.
-        [
-            (await resolve_result(arg)) if isinstance(arg, ServiceResult) else arg
-            for arg in args
-        ],
-        {
-            k: (await resolve_result(v)) if isinstance(v, ServiceResult) else v
-            for k, v in kwargs.items()
-        },
-    )
-
-
-class ServiceCallBase:
-    def __await__(self):
-        # This is the key of how this whole system works. `await`ing on a ServiceCall
-        # instance yields the coroutine down into `kernel_main`, which can then validate
-        # and execute the call. In normal asyncio this would be illegial; in the normal
-        # event loops, yielding a value is illegal and throws a RuntimeException. This
-        # is implementation specific to the asyncio library; rather async and await
-        # methods are just coroutines and yielding values is fine! Since we can
-        # orchestrate the coroutine entirely on our own from kernel_main, the underlying
-        # event loop never sees the yielded value, and we're free to use async/await
-        # syntax for coroutines like we want :)
-        #
-        # when kernel_main does `send`, yield returns a value, ie. the service call result;
-        # that's what we return here, and then awaiting on the ServiceCall gives the
-        # return value from the actual call.
-        #
-        # It's possible that there should be a debug flag which shows the full stack trace
-        # (current behavior) but by default remove the kernel aspects; they're already
-        # muddying the stack quite a bit, but at least for now it's still informative.
-        return (yield self)
-
-
-@dataclasses.dataclass
-class ServiceCall(ServiceCallBase):
-    """Data class for a ServiceCall to be passed down to the kernel to execute.
-    Simply we're the kernel to execute the following:
-
-    service = lookup_or_start_service(service)
-    endpoint = getattr(service, endpoint)
-    with execution_context.active():
-        return endpoint(*args, **kwargs)
-    """
-
-    # Desired execution context for the system call to run in
-    execution_context: ExecutionContext
-    # The type of the service to call; the kernel is responsible for mapping this
-    service: type["Service"]
-    # If there are multiple implementations of the service running and available to
-    # the user, then IDs can differentiate them. If you don't care which one you get,
-    # you don't have to specify.
-    service_id: Optional[str]
-    # The name of the endpoint method to call on the service
-    endpoint: str
-    # args and kwargs for the endpoint method
-    args: list[any]
-    kwargs: dict[str, any]
-
-
-T = TypeVar("T")
-
-
-@dataclasses.dataclass
-class Schedule(ServiceCallBase, Generic[T]):
-    """A ServiceCall that schedules a ServiceResult or coroutine. This adds
-    the coroutine to the Scheduler queue as ready, but doesn't wait on it yet.
-    You can await on it or not in your process later, and use normal ServiceResult
-    semantics on it ie. deferred computation.
-    """
-
-    execution_context: ExecutionContext
-    awaitable: Awaitable[T]
-
-
-class ScheduleToken:
-    """Special token used by the Scheduler to track scheduled results."""
-
-
-@dataclasses.dataclass
-class AwaitScheduled(ServiceCallBase):
-    """Wait on a previously scheduled coroutine."""
-
-    token: ScheduleToken
-
-
-async def schedule(coro: Awaitable[T]) -> ServiceResult[T]:
-    """Schedule a coroutine or service call to be put into the task pool.
-    It will run in "parallel", and can either be awaited on or not. Even
-    if it is never awaited, it will eventually complete."""
-    if not isinstance(coro, ServiceResult):
-        coro = ServiceResultImpl(coro)
-    token = await Schedule(current_execution_context(), coro)
-    return AwaitScheduled(token)
-
-
-def gather(*calls: Awaitable[any]) -> ServiceResult[Tuple[any]]:
-    """Await on any number of awaitable coroutines or service calls. They
-    can be executed in parallel before re-scheduling this task."""
-    return ServiceResultImpl[Tuple[any]](_gather(calls))
-
-
-async def _gather(calls: Awaitable[any]) -> Tuple[any]:
-    all_scheduled = [await schedule(call) for call in calls]
-    return tuple([await scheduled for scheduled in all_scheduled])
-
-
-async def execute_service_call(service, service_id, endpoint_handle, args, kwargs):
-    """Do arg resolution, build and yield ServiceCall based on current execution context."""
-    # We want to be very specific about when we grab the execution context
-    # this isn't a security issue from a sytem standpoint since the kernel will
-    # get to validate that the EC we're passing; however if it's done at the wrong
-    # time, for instance if some callback is executed that switches the active EC
-    # in subtle way, we'll introduce a really hard to grok permissions bug where
-    # we're giving permissions the user doesn't expect.
-
-    # In this case since we wait for all of these to fully resolve, they shouldn't
-    # be able to leak a context where we changed EC, so we can grab current EC after.
-    args, kwargs = await resolve_args(args, kwargs)
-
-    return await ServiceCall(
-        current_execution_context(),
-        service,
-        service_id,
-        endpoint_handle.__name__,
-        args,
-        kwargs,
-    )
-
-
-def wrap_service_call(
+def create_service_endpoint(
     service: type["Service"],
     endpoint_handle: Callable[..., Awaitable[T]],
-) -> Callable[..., ServiceResult[T]]:
+) -> Callable[..., ServiceCall[T]]:
     """Replaces an async method on a service interface with one which actually executes
     the service call."""
     # Do as much work outside of wrapper as we can since this will be critical path
@@ -208,13 +65,17 @@ def wrap_service_call(
     )
 
     @functools.wraps(endpoint_handle)
-    def wrapper(self, *args, **kwargs) -> ServiceResult[return_type]:
-        handle = execute_service_call(
-            service, self.service_id, endpoint_handle, args, kwargs
+    def service_endpoint(self, *args, **kwargs) -> ServiceCall[return_type]:
+        return ServiceCall[return_type](
+            current_execution_context(),
+            service,
+            self.service_id,
+            endpoint_handle.__name__,
+            args,
+            kwargs,
         )
-        return ServiceResultImpl[return_type](handle)
 
-    return wrapper
+    return service_endpoint
 
 
 class ServiceMeta(type):
@@ -224,7 +85,7 @@ class ServiceMeta(type):
         # This could probably be implemented with __init_subclass__
         # but it's fine as it is for now :)
 
-        client_type = super().__new__(cls, name, bases, namespace)
+        client_type: type[Service] = super().__new__(cls, name, bases, namespace)
 
         # vars().update is gone in python3 / mappingproxy
         endpoints = [
@@ -234,7 +95,8 @@ class ServiceMeta(type):
             and not getattr(value, "__is_client_method__", False)
         ]
         for attr in endpoints:
-            setattr(client_type, attr, wrap_service_call(client_type, namespace[attr]))
+            service_endpoint = create_service_endpoint(client_type, namespace[attr])
+            setattr(client_type, attr, service_endpoint)
 
         backend_bases = (
             *(base.Backend for base in bases if hasattr(bases, "Backend")),
@@ -277,11 +139,15 @@ class ServiceBackendBase:
         return True
 
     async def endpoints(self) -> dict[str, inspect.Signature]:
-        """Return"""
+        """Return"""  # TODO
         return {
             endpoint: inspect.signature(getattr(self, endpoint))
             for endpoint in self.interface.__endpoints__
         }
+
+    async def __call__(self, service_call: ServiceCall):
+        endpoint = getattr(self, service_call.endpoint)
+        return await endpoint(*service_call.args, **service_call.kwargs)
 
 
 def clientmethod(method):

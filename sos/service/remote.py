@@ -1,6 +1,5 @@
 import asyncio
 import dataclasses
-import functools
 from typing import Optional, Tuple, Type, TypeVar
 import uuid
 
@@ -8,6 +7,7 @@ import dill
 
 from sos.execution_context import ExecutionContext, current_execution_context
 from . import Service, ServiceCall
+from sos.services import Services
 from sos.services.authentication import Authentication
 
 S = TypeVar("S", bound=Service)
@@ -87,32 +87,46 @@ class Remote:
     #       any other service
     _sessions: dict[RemoteSpec, SessionToken] = {}
 
-    async def __call_remote(self, service_call) -> any:
+    async def __call__(self, service_call) -> any:
         session_token = self._sessions.get(self.args.remote_id)
         if not session_token and service_call.service is not Authentication:
             session_token = await self.create_session()
         reader, writer = await asyncio.open_connection(*self.args.remote_id)
+
+        # re-route service ID to the configure remote service ID
+        service_call = dataclasses.replace(
+            service_call, service_id=self.args.remote_service_id
+        )
+
         writer.write(dill.dumps((session_token, service_call)))
         writer.write_eof()
         try:
             response = dill.loads(await reader.read())
-        except NoActiveSession:
-            print("Session invalid, attempting to create new session")
-            if await self.create_session():
-                print("Retrying")
-                return await self.__call_remote(service_call)
-            else:
-                raise RuntimeError("Got back empty session token from remote auth")
-        else:
             if isinstance(response, Exception):
                 raise response
             else:
                 return response
+        except NoActiveSession:
+            print("Session invalid, attempting to create new session")
+            if await self.create_session():
+                print("Retrying")
+                return await self(service_call)
+            else:
+                raise RuntimeError("Got back empty session token from remote auth")
 
     async def create_session(self):
         spec = self.args.remote_id
         remote = Remote[Authentication](self.Args(spec))
-        token = self._sessions[spec] = await remote.authenticate(None)
+        token = self._sessions[spec] = await remote(
+            ServiceCall(
+                execution_context=current_execution_context(),
+                service=Authentication,
+                service_id=None,
+                endpoint="authenticate",
+                args=(None,),
+                kwargs={},
+            )
+        )
         return token
 
     _class_cache: dict[Type[Service], Type["Remote"]] = {}
@@ -122,32 +136,18 @@ class Remote:
         if not issubclass(item, Service):
             raise TypeError(f"Remote must take a Service type parameter; got {item}.")
         if not (cached := cls._class_cache.get(item)):
-            cached = cls._class_cache[item] = cls.make_remote_backend(item)
+            cached = cls._class_cache[item] = type(
+                f"Remote[{item.__name__}].Backend",
+                (cls, item.Backend),
+                {},
+            )
         return cached
 
-    @classmethod
-    def make_remote_backend(cls, service_type: Type[Service]):
-        def make_endpoint(endpoint):
-            @functools.wraps(getattr(service_type, endpoint))
-            async def remote_endpoint(self, *args, **kwargs):
-                service_call = ServiceCall(
-                    current_execution_context(),
-                    service_type,
-                    self.args.remote_service_id,
-                    endpoint,
-                    args,
-                    kwargs,
-                )
-                return await self.__call_remote(service_call)
 
-            return remote_endpoint
+class RemoteServicesBackend(Remote[Services]):
+    """A fully remote Services backend suitable for remote shells and the like."""
 
-        endpoints = {
-            endpoint: make_endpoint(endpoint) for endpoint in service_type.__endpoints__
-        }
-
-        return type(
-            f"Remote[{service_type.__name__}].Backend",
-            (cls, service_type.Backend),
-            endpoints,
-        )
+    def get_backend(
+        self, service: type[Service], service_id: Optional[str] = None
+    ) -> Service.Backend:
+        return Remote[service](Remote.Args(self.args.remote_id, service_id))

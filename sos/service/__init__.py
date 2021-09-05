@@ -1,10 +1,2 @@
-from .service_result import ServiceResult
-from .service import (
-    ScheduleToken,
-    Service,
-    ServiceCall,
-    clientmethod,
-    current_call,
-    gather,
-    schedule,
-)
+from .service_call import ServiceCall, ScheduleToken, schedule, gather
+from .service import Error, Service, ServiceNotFound, clientmethod, current_call

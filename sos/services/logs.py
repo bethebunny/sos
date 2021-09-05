@@ -98,9 +98,12 @@ class Logs(Service):
         return await schedule(self.write_log(log_line))
 
 
-def log(**data: any) -> ScheduleToken:
+async def log(**data: any) -> ScheduleToken:
     """Sugar for Logs().log(**data)."""
-    return Logs().log(_currentframe=inspect.currentframe(), **data)
+    try:
+        return await Logs().log(_currentframe=inspect.currentframe(), **data)
+    except service.ServiceNotFound:
+        pass
 
 
 @dataclasses.dataclass

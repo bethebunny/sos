@@ -12,6 +12,15 @@ from sos.service.service import Service, ServiceMeta, ServiceNotFound
 #   - Interface for services complaining / saying they're unhealthy / notifying of shutdown
 #   - better docs en backend
 #   - premade words list
+#   - actually check that the passed backend implements the interface :P
+#   - allow services to provide futures to wait on some state change
+#   - RemoteServicesBackend
+#       - share session tokens between remotes pointing at the same service
+#       - scheduled schedules in the local kernel, not remotely
+#       - host/port spec
+#       - real auth
+#   - Some notion of "core" services which are required to fully import the kernel
+#       and simplify the import dependency graph
 
 
 def _load_words(path: str = "/usr/share/dict/words"):
@@ -83,6 +92,9 @@ class Services(Service):
         [BackendRegistryRecord(service_id="highlander", TheServicesBackend, Service.Backend.Args())]
         """
 
+    async def shutdown_backend(self, service: type[Service], service_id: str):
+        """Shut down and unregister a service backend instance."""
+
 
 class TheServicesBackend(Services.Backend):
     def __init__(self):
@@ -113,9 +125,19 @@ class TheServicesBackend(Services.Backend):
         self, service: type[Service]
     ) -> list[(str, type[Service.Backend], Service.Backend.Args)]:
         return [
-            (service_id, type(backend), backend.args)
+            BackendRegistryRecord(service_id, type(backend), backend.args)
             for service_id, backend in self._running.get(service, {}).items()
         ]
+
+    async def shutdown_backend(self, service: type[Service], service_id: str):
+        print(self._running)
+        backend_instance = self._running[service][service_id]
+        try:
+            await backend_instance.shutdown()
+        finally:
+            for service_implemented in service.__mro__:
+                if issubclass(service_implemented, Service):
+                    del self._running[service_implemented][service_id]
 
     def register_backend_instance(
         self, service: type[Service], instance: Service.Backend, service_id: str
@@ -133,7 +155,7 @@ class TheServicesBackend(Services.Backend):
         if service_id is not None:
             if service_id not in impls:
                 raise ServiceNotFound(
-                    "no {service} backend running with ID {service_id}"
+                    f"no {service} backend running with ID {service_id}"
                 )
             return impls[service_id]
         else:

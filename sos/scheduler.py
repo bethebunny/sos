@@ -6,14 +6,14 @@ from typing import Coroutine, Iterable, NamedTuple, Tuple, Union
 from weakref import WeakKeyDictionary, WeakSet
 
 from .execution_context import ExecutionContext, current_execution_context
-from .service.service import (
-    AwaitScheduled,
-    ScheduleToken,
-)
-from .util.coro import async_yield
+from .service.service_call import AwaitScheduled, ScheduleToken
 
 
 # TODO: don't busyloop when there's nothing to do :P
+# TODO: unit test for CancelledError
+# TODO: does asyncio.gather work naturally in place of service.gather?
+# TODO: figure out what things can and can't be weakref'd that might matter
+#       1. async_gen_asend (aka __anext__)
 
 
 # use a namedtuple here because we want to unpack them in kernel_main
@@ -136,6 +136,8 @@ class Scheduler:
 
         self.asyncio_loop: asyncio.BaseEventLoop = asyncio.new_event_loop()
         self.asyncio_loop.set_task_factory(self.asyncio_task_factory)
+        # Helps us tracking running the event loop in between other scheduled work
+        self._asyncio_loop_scheduled = False
 
     def schedule_now(
         self,
@@ -181,6 +183,12 @@ class Scheduler:
         # Always store results; it's a weak key dict so if nothing's waiting they'll be GCed later
         self.scheduled_results[coro] = (value, threw)
 
+    def surface_orphaned_exceptions(self):
+        """Yell about any exceptions which were raised by scheduled coroutines but
+        whose results were never awaited on anywhere."""
+        for exception in self.scheduled_raised_exceptions:
+            exception.verify_waited_on()
+
     # -------------- asyncio loop interop -----------------------------------------------
 
     def asyncio_task_factory(self, loop, coro):
@@ -206,13 +214,14 @@ class Scheduler:
         finally:
             self.waiting_futures.remove(f)
 
-    def run_asyncio_loop_once(self):
+    async def run_asyncio_loop_once(self):
         # The loop won't "run" if there's already one "running", but eg. asyncio.create_task
         # checks for the "running" loop :P
         asyncio.events._set_running_loop(None)
         self.asyncio_loop.call_soon(self.asyncio_loop.stop)
         self.asyncio_loop.run_forever()
         asyncio.events._set_running_loop(self.asyncio_loop)
+        self._asyncio_loop_scheduled = False
 
     # ----------------- scheduler main loop ------------------------------------------------
 
@@ -220,22 +229,16 @@ class Scheduler:
         """Loop through the ready scheduled coroutines until their are none.
         Unless re-scheduled, yielded coroutines and results are removed from the queue.
         """
+        loop_ec = current_execution_context()
         asyncio.set_event_loop(self.asyncio_loop)
         asyncio.events._set_running_loop(self.asyncio_loop)
         try:
-            while True:
+            while self.ready or self.waiting or self.waiting_futures:
                 if self.ready:
                     yield self.ready.popleft()
-                elif self.waiting_futures:
-                    # It's probably not great to only run the event loop when there's no other
-                    # ready tasks, since then we can make the kernel never schedule an event with
-                    # while True: async_yield
-                    # but we could also break the kernel with while True: pass so *shrug*
-                    self.run_asyncio_loop_once()
-                elif not self.waiting:
-                    return
+                if self.waiting_futures and not self._asyncio_loop_scheduled:
+                    self._asyncio_loop_scheduled = True
+                    self.schedule_now(self.run_asyncio_loop_once(), loop_ec)
         finally:
             asyncio.events._set_running_loop(None)
             asyncio.set_event_loop(None)
-            for exception in self.scheduled_raised_exceptions:
-                exception.verify_waited_on()

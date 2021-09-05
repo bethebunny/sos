@@ -8,8 +8,8 @@ import pytest
 from sos import service
 from sos.execution_context import ExecutionContext, User, current_execution_context
 from sos.kernel_main import ServiceHadNoMatchingEndpoint, kernel_main
-from sos.service import Service, ServiceCall
-from sos.service.service import AwaitScheduled, ScheduleToken, ServiceNotFound
+from sos.service import Service, ServiceCall, ServiceNotFound
+from sos.service.service_call import AwaitScheduled, ScheduleToken
 from sos.services import Services
 from sos.util.coro import async_yield
 
@@ -64,7 +64,7 @@ async def services():
     yield (simple_a_id, outsource_a_id)
 
 
-def test_kernel_tests_execute():
+def test_kernel_tests_execute(kernel):
     # Normally doesn't return anything; verify that an exception
     # will propogate up above the kernel
     async def main():
@@ -72,7 +72,42 @@ def test_kernel_tests_execute():
         raise CustomError
 
     with pytest.raises(CustomError):
-        kernel_main(main())
+        kernel.main(main())
+
+
+# TODO: hmm this is super broken :/
+#       it's not even testing the original thing (which I still need to test)
+#       but apparently calling .close() here is removing the future from asyncio loop's
+#       queue, but not actually resolving the future.
+@pytest.mark.skip
+@pytest.mark.kernel
+async def test_cancelled_error_doesnt_exit_kernel():
+    wait_forever = asyncio.sleep(3)
+    token = await service.schedule(wait_forever)
+    wait_forever.close()
+    with pytest.raises(asyncio.CancelledError):
+        await token
+
+
+@pytest.mark.skip
+@pytest.mark.kernel
+async def test_cancelled_error_doesnt_exit_kernel_2():
+    wait_forever = asyncio.sleep(3)
+    token = await service.schedule(wait_forever)
+    wait_forever.close()
+    with pytest.raises(asyncio.CancelledError):
+        await token
+
+
+@pytest.mark.kernel
+async def test_cancelling_future_passes_exception_to_awaiting_task():
+    # TODO: this might just be bad behavior that I'm encoding in unit tests now.
+    #       I would love an exception like AwaitedOnCancelledFuture instead.
+    # TODO: this test still takes 3 seconds to run even though the future is cancelled
+    future = asyncio.create_task(asyncio.sleep(3))
+    future.cancel()
+    with pytest.raises(asyncio.InvalidStateError):
+        await future
 
 
 @pytest.mark.skip
@@ -139,15 +174,21 @@ async def test_service_calls_can_recursively_make_service_calls():
     assert (await A().triangle(10)) == 55
 
 
+# This isn't local to test_clientmethod for some silly reasons related to
+# ServiceMeta.SERVICES being global, pytest running tests in a single interpreter instance,
+# and test_remote.py therefor sometimes trying to pickle Service types defined in other
+# test cases :)
+class B(Service):
+    async def inc(self, x: int) -> int:
+        pass
+
+    @service.clientmethod
+    async def client_inc(self, x: int) -> int:
+        return x + 1
+
+
 @pytest.mark.kernel
 async def test_clientmethod():
-    class B(Service):
-        async def inc(self, x: int) -> int:
-            pass
-
-        @service.clientmethod
-        async def client_inc(self, x: int) -> int:
-            return x + 1
 
     with pytest.raises(ServiceNotFound):
         await B().inc(0)
@@ -166,7 +207,14 @@ async def test_gather(services):
 @pytest.mark.kernel
 async def test_gather_delayed_execution(services):
     simple, _ = services
-    assert 55 == await service.gather(*(map(A(simple).inc, range(10)))).apply(sum)
+    assert 55 == sum(await service.gather(*(map(A(simple).inc, range(10)))))
+
+
+@pytest.mark.skip
+@pytest.mark.kernel
+async def test_asyncio_gather_delayed_execution(services):
+    simple, _ = services
+    assert 55 == sum(await asyncio.gather(*(map(A(simple).inc, range(10)))))
 
 
 @pytest.mark.kernel

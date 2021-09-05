@@ -4,15 +4,9 @@ from typing import Coroutine
 
 from .execution_context import ExecutionContext, current_execution_context
 from .scheduler import RaisedResult, Scheduler
-from .service.service import (
-    AwaitScheduled,
-    Error,
-    ServiceCall,
-    Schedule,
-    ServiceCallBase,
-    ServiceHadNoMatchingEndpoint,
-    current_call,
-)
+from .service.remote import Remote
+from .service.service_call import AwaitScheduled, ServiceCall, Schedule, ServiceCallBase
+from .service.service import Error, ServiceHadNoMatchingEndpoint, current_call
 from .services import Services
 from .services.services import TheServicesBackend
 
@@ -27,6 +21,8 @@ from .services.services import TheServicesBackend
 #   - what happens if a scheduled asyncio.Future raises?
 #   - make a mechanism to .close() all running stuff
 #   - track services which schedule coroutines that don't shut down gracefully
+#   - unit test for .close on coroutines
+#   - decide if StopAsyncIteration should also be handled specially by the kernel
 
 
 class InvalidExecutionContextRequested(Error):
@@ -66,9 +62,11 @@ async def handle_service_call(
         raise ServiceHadNoMatchingEndpoint(service_call.service, service_call.endpoint)
 
     backend = services.get_backend(service_call.service, service_call.service_id)
-    endpoint = getattr(backend, service_call.endpoint)
     with requested_ec.active(), current_call(backend, service_call.endpoint):
-        return await endpoint(*service_call.args, **service_call.kwargs)
+        result = await backend(service_call)
+        if service_call.transform_result and not isinstance(backend, Remote):
+            result = await service_call.transform_result(result)
+        return result
 
 
 async def handle_scheduled(ec: ExecutionContext, scheduled: Schedule) -> any:
@@ -150,11 +148,19 @@ class Kernel:
             except StopIteration as e:
                 self.scheduler.resolve(coro, e.value, threw=False)
             except BaseException as e:
-                if coro is main:
-                    raise e
                 self.scheduler.resolve(coro, e, threw=True)
             else:
                 self.schedule_service_call(coro, service_call, ec)
+
+        # Determine the return result of the original coroutine, and clean up
+        result, threw = self.scheduler.scheduled_results[main]
+        try:
+            if threw:
+                raise result.exception
+            else:
+                return result
+        finally:
+            self.scheduler.surface_orphaned_exceptions()
 
 
 def kernel_main(main: Coroutine) -> any:
